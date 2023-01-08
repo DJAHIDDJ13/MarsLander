@@ -4,6 +4,7 @@ import time
 import random
 import numpy as np
 import copy
+import gym
 
 class Vector2D:
     def __init__(self, *args):
@@ -68,7 +69,7 @@ class Vector2D:
         return (x - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
     
 class Lander:
-    def __init__(self, x, y, vx, vy):
+    def __init__(self, x=6500, y=2600, vx=0, vy=0):
         # Constants
         self.GRAVITY = 3.711
         self.LANDER_RADIUS = 50
@@ -95,14 +96,14 @@ class Lander:
         self.distance_sensors_angles = [Vector2D.remap_scalar(i, 0, self.num_distance_sensors, 0, 360) for i in range(self.num_distance_sensors)]
         self.distance_sensors_values = [-1 for _ in range(self.num_distance_sensors)]
         self.distance_sensors_collisions = [None for _ in range(self.num_distance_sensors)]
-
+    
     def apply_force(self, force):
         self.acceleration += force
 
     def add_to_surface(self, surface):
         self.surface = surface
 
-    def step(self, desired_angle, desired_thrust, dt):
+    def step(self, desired_angle, desired_thrust, dt=1):
         # Check if the lander has landed or gone out of bounds
         if self.position.y > WORLD_HEIGHT or self.position.y < 0 or self.crashed or self.landed or self.position.x < 0 or self.position.x > WORLD_WIDTH:
             # Stop the lander
@@ -561,7 +562,7 @@ class RendererHandler:
                 # Reset the desired angle and thrust when the keys are released
                 self.desired_angle = 0
                 self.desired_thrust = 0
-            
+
     def render_debug(self):
         if self.show_debug:
             if self.keyboard_control_mode:
@@ -598,9 +599,153 @@ class RendererHandler:
         if self.sim_paused:
             screen.blit(self.pause_text, (1250, 10))
 
+class MarsLanderEnv(gym.Env):
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "render_fps": 60,
+    }
+    def __init__(self, lander, surface, render_mode='human'):
+        self.lander = lander
+        self.surface = surface
+
+        low_pos = np.array([0, 0], dtype=np.float32)
+        high_pos = np.array([7000, 3000], dtype=np.float32)
+        low_vel = np.array([-1000, -1000], dtype=np.float32)
+        high_vel = np.array([1000, 1000], dtype=np.float32)
+        low_angle = np.array([-90], dtype=np.float32)
+        high_angle = np.array([90], dtype=np.float32)
+        low_thrust = np.array([0], dtype=np.float32)
+        high_thrust = np.array([4], dtype=np.float32)
+        low_sensors = np.zeros(lander.num_distance_sensors, dtype=np.float32)
+        high_sensors = np.full(lander.num_distance_sensors, 7000, dtype=np.float32)
+        low = np.concatenate((low_pos, low_vel, low_angle, low_thrust, low_sensors))
+        high = np.concatenate((high_pos, high_vel, high_angle, high_thrust, high_sensors))
+        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=np.array([0, -90]), high=np.array([4, 90]), dtype=np.int32)
+
+        self.screen = None
+        self.render_mode = render_mode
+        self.clock = None
+        
+    def reset(self):
+        self.lander.reset()
+        self.surface.reset()
+        self.lander.add_to_surface(self.surface)
+
+        if self.render_mode == "human":
+            self.render()
+        return self.lander.get_state()
+    
+    def step(self, action):
+        self.lander.step(action[1], action[0])
+        pos = self.lander.position
+        vel = self.lander.velocity
+        state = [
+            pos.x,
+            pos.y,
+            vel.x,
+            vel.y,
+            self.lander.angle,
+            self.lander.force
+        ]
+        state.extend(self.lander.distance_sensors_values)
+
+        assert len(state) == 6 + self.lander.num_distance_sensors
+        
+        reward = 3000
+        landing_zone_segment = self.surface.segments[self.surface.landing_zone_index]
+        landing_zone_midpoint = (landing_zone_segment[0] + landing_zone_segment[1])/2
+        distance_from_landing_zone = (self.lander.position - landing_zone_midpoint).length()
+        reward -= distance_from_landing_zone
+
+        done = self.lander.landed or self.lander.crashed
+        info = {}
+
+        if self.render_mode == "human":
+            self.render()
+        return state, reward, done, info
+
+    def render(self, mode='human'):
+        if self.screen is None and self.render_mode == "human":
+            pygame.init()
+            pygame.display.init()
+            self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        if self.clock is None:
+            self.clock = pygame.time.Clock()
+
+        self.surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.lander.render(self.surf)
+        self.surface.render(self.surf)
+        
+        if self.render_mode == "human":
+            assert self.screen is not None
+            self.screen.blit(self.surf, (0, 0))
+            pygame.event.pump()
+            self.clock.tick(self.metadata["render_fps"])
+            pygame.display.flip()
+        elif self.render_mode == "rgb_array":
+            return np.transpose(
+                np.array(pygame.surfarray.pixels3d(self.surf)), axes=(1, 0, 2)
+            )
+
+    def close(self):
+        if self.screen is not None:
+            import pygame
+
+            pygame.display.quit()
+            pygame.quit()
+            self.isopen = False
+
+P = Vector2D(0, 0)
+Q = Vector2D(1, 1)
+X = Vector2D(0, 1)
+QP = (Q - P)
+ds = (X - P).dot(QP) / QP.dot(QP)
+S = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+print(S)
+
 # Set up the Pygame window
 WORLD_WIDTH, WORLD_HEIGHT = 7000, 3000
 SCREEN_WIDTH, SCREEN_HEIGHT = 1400, 700
+# Create a lander
+lander = Lander(6500, 2600, 0, 0)
+surface = Surface([(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)])
+lander.add_to_surface(surface)
+
+lander_env = MarsLanderEnv(lander, surface, render_mode='human')
+lander_env.render()
+desired_angle, desired_thrust = 0, 0
+while True:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            self.sim_running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_LEFT:
+                desired_angle = 60
+            elif event.key == pygame.K_RIGHT:
+                desired_angle = -60
+            elif event.key == pygame.K_UP:
+                desired_thrust = 4
+            elif event.key == pygame.K_DOWN:
+                desired_thrust = 0
+            elif event.key == pygame.K_F5:
+                # Reset the lander and surface
+                lander.reset()
+                surface.reset()
+        elif event.type == pygame.KEYUP:
+            # Reset the desired angle and thrust when the keys are released
+            desired_angle = 0
+            desired_thrust = 0
+    action = [desired_thrust, desired_angle]
+    observation, reward, done, info = lander_env.step(action)
+    #print(observation, reward, done, info)
+    lander_env.render()
+    if done:
+        break
+
+lander_env.close()
+
+"""
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption('2D Mars Lander')
 
@@ -651,3 +796,4 @@ while running:
         
     # Update the display
     pygame.display.update()
+"""
