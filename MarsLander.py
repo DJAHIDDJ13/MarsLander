@@ -69,7 +69,7 @@ class Vector2D:
         return (x - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
     
 class Lander:
-    def __init__(self, x=6500, y=2600, vx=0, vy=0):
+    def __init__(self, init_position, init_velocity):
         # Constants
         self.GRAVITY = 3.711
         self.LANDER_RADIUS = 50
@@ -84,8 +84,8 @@ class Lander:
         self.right_leg_collision = False
         
         # Initial position and velocity of the lander
-        self.position = Vector2D(x, y)
-        self.velocity = Vector2D(vx, vy)
+        self.position = init_position
+        self.velocity = init_velocity
         self.acceleration = Vector2D(0, 0)
         # Angle and force of the thruster
         self.angle = 0
@@ -363,15 +363,22 @@ class Chromosome:
         self.landed = lander.landed
         self.crashed = lander.crashed
         landing_zone_segment = lander.surface.segments[lander.surface.landing_zone_index]
-        landing_zone_midpoint = (landing_zone_segment[0] + landing_zone_segment[1])/2
-        self.distance_from_crash_zone = (lander.position - landing_zone_midpoint).length()
+
+        # Calculating the closest point in the landing segment to the crash zone
+        P = landing_zone_segment[0]
+        Q = landing_zone_segment[1]
+        X = lander.position
+        QP = (Q - P)
+        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
+        closest_point_to_crash_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        self.distance_from_landing_zone = (lander.position - distance_from_landing_zone).length()
         self.crash_speed = copy.deepcopy(lander.velocity)
         self.fitness = self.calc_fitness()
     
     def calc_fitness(self):
         # Calculate the fitness based on the distance from the crash zone
         # and the length of the run
-        distance_from_crash_zone = self.distance_from_crash_zone
+        distance_from_landing_zone = self.distance_from_landing_zone
         fitness = 500 - distance_from_crash_zone /20\
                       - abs(self.crash_speed.x) \
                       - abs(self.crash_speed.y)/2 
@@ -604,10 +611,10 @@ class MarsLanderEnv(gym.Env):
         "render_modes": ["human", "rgb_array"],
         "render_fps": 60,
     }
-    def __init__(self, lander, surface, render_mode='human'):
-        self.lander = lander
-        self.surface = surface
-
+    def __init__(self, init_position, init_velocity, surface_topology, render_mode='human'):
+        self.lander = Lander(init_position, init_velocity)
+        self.surface = Surface(surface_topology)
+        self.lander.add_to_surface(self.surface)
         low_pos = np.array([0, 0], dtype=np.float32)
         high_pos = np.array([7000, 3000], dtype=np.float32)
         low_vel = np.array([-1000, -1000], dtype=np.float32)
@@ -616,8 +623,8 @@ class MarsLanderEnv(gym.Env):
         high_angle = np.array([90], dtype=np.float32)
         low_thrust = np.array([0], dtype=np.float32)
         high_thrust = np.array([4], dtype=np.float32)
-        low_sensors = np.zeros(lander.num_distance_sensors, dtype=np.float32)
-        high_sensors = np.full(lander.num_distance_sensors, 7000, dtype=np.float32)
+        low_sensors = np.zeros(self.lander.num_distance_sensors, dtype=np.float32)
+        high_sensors = np.full(self.lander.num_distance_sensors, 7000, dtype=np.float32)
         low = np.concatenate((low_pos, low_vel, low_angle, low_thrust, low_sensors))
         high = np.concatenate((high_pos, high_vel, high_angle, high_thrust, high_sensors))
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
@@ -696,23 +703,15 @@ class MarsLanderEnv(gym.Env):
             pygame.quit()
             self.isopen = False
 
-P = Vector2D(0, 0)
-Q = Vector2D(1, 1)
-X = Vector2D(0, 1)
-QP = (Q - P)
-ds = (X - P).dot(QP) / QP.dot(QP)
-S = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
-print(S)
-
 # Set up the Pygame window
 WORLD_WIDTH, WORLD_HEIGHT = 7000, 3000
 SCREEN_WIDTH, SCREEN_HEIGHT = 1400, 700
 # Create a lander
-lander = Lander(6500, 2600, 0, 0)
-surface = Surface([(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)])
-lander.add_to_surface(surface)
+SURFACE_TOPOLOGY = [(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)]
+INIT_POSITION = Vector2D(6500, 2600)
+INIT_VELOCITY = Vector2D(0, 0)
 
-lander_env = MarsLanderEnv(lander, surface, render_mode='human')
+lander_env = MarsLanderEnv(INIT_POSITION, INIT_VELOCITY, SURFACE_TOPOLOGY, render_mode='human')
 lander_env.render()
 desired_angle, desired_thrust = 0, 0
 while True:
@@ -721,9 +720,9 @@ while True:
             self.sim_running = False
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_LEFT:
-                desired_angle = 60
+                desired_angle = 10
             elif event.key == pygame.K_RIGHT:
-                desired_angle = -60
+                desired_angle = -10
             elif event.key == pygame.K_UP:
                 desired_thrust = 4
             elif event.key == pygame.K_DOWN:
