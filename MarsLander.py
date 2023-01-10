@@ -4,7 +4,7 @@ import time
 import random
 import numpy as np
 import copy
-
+import matplotlib.pyplot as plt
 class Vector2D:
     def __init__(self, *args):
         if isinstance(args[0], tuple):
@@ -118,7 +118,7 @@ class Lander:
         self.apply_force(thruster_force)
         self.apply_force(Vector2D(0, -self.GRAVITY))
         # Update the velocity of the lander based on its acceleration
-        self.velocity += self.acceleration
+        self.velocity += self.acceleration * dt
         # Update the position of the lander based on its velocity
         self.position += self.velocity * dt
         # Reset the acceleration of the lander
@@ -127,7 +127,7 @@ class Lander:
         
         return True
     def reset(self):
-            self.__init__(6500, 2600, 0, 0)
+            self.__init__(START_X, START_Y, 0, 0)
 
     def run(self, chromosome):
         path = []
@@ -138,6 +138,17 @@ class Lander:
                 break
         return path
 
+    def distance_to_landing_zone(self):
+        landing_zone_segment = self.surface.segments[lander.surface.landing_zone_index]
+        # Calculating the closest point in the landing segment to the crash zone
+        P = landing_zone_segment[0]
+        Q = landing_zone_segment[1]
+        X = lander.position
+        QP = (Q - P)
+        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
+        closest_point_to_landing_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        return (self.position - closest_point_to_landing_zone).length()
+        
     def render(self, screen):
         # Calculate the position of the landing legs
         left_landing_leg = self.position - Vector2D(0, self.LANDING_LEG_LENGTH).rotate(self.angle+self.LANDING_LEG_ANGLE)
@@ -187,17 +198,17 @@ class Surface:
         lander.right_leg_collision = False
         lander.left_leg_collision = False
         lander.body_collision = False
-        lander.distance_sensors_values = [99999 for _ in range(lander.num_distance_sensors)]
-        lander.distance_sensors_collisions = [None for _ in range(lander.num_distance_sensors)]
+        #lander.distance_sensors_values = [99999 for _ in range(lander.num_distance_sensors)]
+        #lander.distance_sensors_collisions = [None for _ in range(lander.num_distance_sensors)]
         for i, segment in enumerate(self.segments):
             self.collisions[i] = self.collides_with_lander(lander, segment)
-            for j, distance_sensor_angle in enumerate(lander.distance_sensors_angles):
-                ds_segment = (lander.position, lander.position + Vector2D(WORLD_WIDTH, 0).rotate(distance_sensor_angle))
-                hit, collision_point = self.collides_with_segment(segment, ds_segment)
-                temp_dist = (lander.position - collision_point).length()
-                if hit and lander.distance_sensors_values[j] > temp_dist:
-                    lander.distance_sensors_values[j] = temp_dist
-                    lander.distance_sensors_collisions[j] = collision_point
+            #for j, distance_sensor_angle in enumerate(lander.distance_sensors_angles):
+            #    ds_segment = (lander.position, lander.position + Vector2D(WORLD_WIDTH, 0).rotate(distance_sensor_angle))
+            #    hit, collision_point = self.collides_with_segment(segment, ds_segment)
+            #    temp_dist = (lander.position - collision_point).length()
+            #    if hit and lander.distance_sensors_values[j] > temp_dist:
+            #        lander.distance_sensors_values[j] = temp_dist
+            #        lander.distance_sensors_collisions[j] = collision_point
             if not self.collisions[i]:
                 continue
             if lander.angle == 0 and abs(lander.velocity.y) <= 40 and abs(lander.velocity.x) <= 20:
@@ -334,26 +345,53 @@ class Chromosome:
         self.genes = genes
         self.fitness = 0
         self.run(lander)
+        self.lander = lander
 
     @classmethod
     def random_chromosome(cls, lander, num_timesteps):
         genes = []
-        for t, a in zip(random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 1, 6], k=num_timesteps-1),
-                        np.random.randint(-90, 90, size=num_timesteps-1)):
-            thrust = int(t)
-            angle = int(a)
+        #rand_angle = np.random.normal(loc=0, scale=15, size=num_timesteps)
+        #rand_angle = rand_angle.round()
+        #rand_angle = np.minimum(rand_angle, 90)
+        #rand_angle = np.maximum(rand_angle, -90)
+        #rand_angle = np.random.randint(-90, 90, size=num_timesteps)
+        #rand_thrust = random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 1, 6], k=num_timesteps)
+        #rand_thrust = np.random.randint(0, 4, size=num_timesteps)
+        #for t, a in zip(rand_thrust, rand_angle):
+        prev_angle = random.randint(-90, 90)
+        for i in range(num_timesteps):
+            rand_thrust = random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 2, 6], k=1)[0]
+            #rand_thrust = random.randint(0, 4)
+            thrust = rand_thrust
+            angle = random.randint(-15, 15) + prev_angle
+            angle = max(-90, angle)
+            angle = min(90, angle)
             genes.append(Gene(thrust, angle))
-        genes.append(Gene(4, 0))
+            prev_angle = angle
         chrom = cls(lander, genes)
         chrom.run(lander)
         return chrom
 
     def mutate(self, probability=.1):
+        prev_gene = None
         for i, gene in enumerate(self.genes):
             if random.uniform(0, 1) < probability and i != len(self.genes) -1:
-                gene.thrust = random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 1, 6], k=1)[0]
-                gene.angle = random.randint(-90, 90)
-            
+                rand_thrust = random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 2, 6], k=1)[0]
+                #rand_thrust = random.randint(0, 4)
+                gene.thrust = rand_thrust
+                #rand_angle = np.random.normal(loc=0, scale=15)
+                #rand_angle = round(rand_angle)
+                #rand_angle = min(rand_angle, 90)
+                #rand_angle = max(rand_angle, -90)
+                if i == 0:
+                    rand_angle = random.randint(-90, 90)
+                    gene.angle = rand_angle
+                else:
+                    rand_angle = random.randint(-15, 15)
+                    gene.angle = rand_angle + prev_gene.angle
+            prev_gene = gene
+        self.run(self.lander)
+
     def run(self, lander):
         # Reset the lander to its initial state
         lander.reset()
@@ -361,24 +399,35 @@ class Chromosome:
         self.path = lander.run(self)
         self.landed = lander.landed
         self.crashed = lander.crashed
-        landing_zone_segment = lander.surface.segments[lander.surface.landing_zone_index]
-        landing_zone_midpoint = (landing_zone_segment[0] + landing_zone_segment[1])/2
-        self.distance_from_crash_zone = (lander.position - landing_zone_midpoint).length()
+
+        self.distance_from_landing_zone = lander.distance_to_landing_zone()
         self.crash_speed = copy.deepcopy(lander.velocity)
         self.fitness = self.calc_fitness()
-    
+
     def calc_fitness(self):
         # Calculate the fitness based on the distance from the crash zone
         # and the length of the run
-        distance_from_crash_zone = self.distance_from_crash_zone
-        fitness = 500 - distance_from_crash_zone /20\
-                      - abs(self.crash_speed.x) \
-                      - abs(self.crash_speed.y)/2 
-#                      + len(self.path) * 2
+
+        # normalize the distance to ~0-1
+        distance_from_landing_zone = self.distance_from_landing_zone / WORLD_WIDTH / 2 
+        crash_speed_x = abs(self.crash_speed.x) 
+        crash_speed_y = abs(self.crash_speed.y) 
+
+        fitness = 700
+
+        if self.distance_from_landing_zone < 10:
+            fitness = 850
+            fitness -= crash_speed_x  + crash_speed_y 
+
+        fitness -= distance_from_landing_zone * 500
+        
         # If the lander crashed or went out of bounds, give it a low fitness
         if self.landed:
-            fitness = 1000
+            fitness += 1000
+        if self.crashed:
+            fitness -= 500
         return fitness
+
 
     def render(self, screen):
         for p1, p2 in zip(self.path, self.path[1:]):
@@ -388,83 +437,12 @@ class Chromosome:
 
 class Population:
     def __init__(self, lander, size):
-        NUM_TIMESTEPS = 150
+        NUM_TIMESTEPS = 200
         self.chromosomes = [Chromosome.random_chromosome(lander, NUM_TIMESTEPS) for _ in range(size)]
         self.best_chromosome = self.chromosomes[0]
         self.generation_num = 0
 
-    def selection2(self, retain_probability=.5, random_select_probability=.7):
-        # Calculate the total fitness of all the chromosomes
-        total_fitness = sum(chromosome.fitness for chromosome in self.chromosomes)
-        
-        # Normalize the fitness values to be between 0 and 1
-        normalized_fitnesses = [(chromosome.fitness - min(self.chromosomes, key=lambda x: x.fitness).fitness) / (1000 - (-2000))
-                                for chromosome in self.chromosomes]
-        
-        # Calculate the probability of selecting each chromosome
-        selection_probabilities = [fitness / total_fitness for fitness in normalized_fitnesses]
-        
-        # Sort the chromosomes by fitness
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-            
-        # Select the chromosomes to be retained
-        parents = []
-        for chromosome, probability in zip(self.chromosomes, selection_probabilities):
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
-            retain_probability -= probability
-            if retain_probability < 0:
-                break
-        
-        return parents
-    
-    def selection(self, retain_probability=.5, random_select_probability=.7):
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-        retain_length = int(len(self.chromosomes) * retain_probability)
-        parents = self.chromosomes[:retain_length]
-        for chromosome in self.chromosomes[retain_length:]:
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
-        return parents
-
-    def crossover(self, parents, children_size):
-        children = []
-        desired_length = children_size - len(parents)
-        while len(children) < desired_length:
-            male = random.randint(0, len(parents) - 1)
-            female = random.randint(0, len(parents) - 1)
-            if male != female:
-                male = parents[male]
-                female = parents[female]
-                half = len(male.genes) // 2
-                child_genes = male.genes[:half] + female.genes[half:]
-                children.append(Chromosome(lander, child_genes))
-        return children
-
-    def evolve2(self, lander, retain_probability=.4, random_select_probability=.5, mutation_probability=.3):
-        self.generation_num += 1
-        parents = self.selection(retain_probability, random_select_probability)
-        children = self.crossover(parents, len(self.chromosomes))
-        for child in children:
-            child.mutate(mutation_probability)
-        parents.extend(children)
-        self.chromosomes = parents
-
-    def evolve(self, lander, retain_probability=.25, random_select_probability=.3, mutation_probability=.4):
-        self.generation_num += 1
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-        retain_length = int(len(self.chromosomes) * retain_probability)
-        parents = self.chromosomes[:retain_length]
-        for chromosome in self.chromosomes[retain_length:]:
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
+    def crossover(self, parents):
         children = []
         desired_length = len(self.chromosomes) - len(parents)
         while len(children) < desired_length:
@@ -473,13 +451,48 @@ class Population:
             if male != female:
                 male = parents[male]
                 female = parents[female]
-                half = (len(male.path) + len(female.path)) // 4
-                if self.generation_num > 50:
-                    female.mutate(.6)
+                #female.mutate(.01)
+                #half = random.randint(1, max(len(male.path), len(female.path)))
+                half = random.randint(1, len(male.genes))
                 child_genes = male.genes[:half] + female.genes[half:]
                 child = Chromosome(lander, child_genes)
-                child.mutate(mutation_probability)
                 children.append(child)
+        return children
+
+    def select(self, retain_probability=.2, random_select_probability=.7):
+        retain_length = int(len(self.chromosomes) * retain_probability)
+        parents = self.chromosomes[:retain_length]
+        for chromosome in self.chromosomes[retain_length:]:
+            if random_select_probability > random.uniform(0, 1):
+                parents.append(chromosome)
+        return parents
+
+    def select1(self, retain_probability=.3):
+        fits = [f.fitness for f in self.chromosomes]
+        normalized_fits = [(f-min(fits))/(max(fits)-min(fits)) for f in fits]
+        
+        parents = random.choices(self.chromosomes,
+                             weights=normalized_fits,
+                             k=int(len(self.chromosomes) * retain_probability))
+        return parents
+
+    def evolve(self, lander, retain_probability=.5, mutation_probability=.01):
+        self.generation_num += 1
+        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
+        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
+            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
+
+        # Selection
+        #parents = self.select(retain_probability, random_select_probability)
+        parents = self.select(retain_probability)
+        
+        # Crossover
+        children = self.crossover(parents)
+
+        # Mutation
+        for child in children:
+            child.mutate(mutation_probability)
+        
         parents.extend(children)
         self.chromosomes = parents
 
@@ -542,11 +555,11 @@ class RendererHandler:
                 self.sim_running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_LEFT:
-                    self.desired_angle = 60
+                    self.desired_angle = 90
                 elif event.key == pygame.K_RIGHT:
-                    self.desired_angle = -60
+                    self.desired_angle = -90
                 elif event.key == pygame.K_UP:
-                    self.desired_thrust = 8
+                    self.desired_thrust = 4
                 elif event.key == pygame.K_DOWN:
                     self.desired_thrust = 0
                 elif event.key == pygame.K_SPACE:
@@ -574,7 +587,6 @@ class RendererHandler:
                 landed_text = self.debug_font.render(f"LANDED {lander.landed}", False, (255, 255, 255))
                 crashed_text = self.debug_font.render(f"CRASHED {lander.crashed}", False, (255, 255, 255))
 
-
                 screen.blit(pos_debug_text, (10, 10))
                 screen.blit(alt_debug_text, (10, 20))
                 screen.blit(velx_debug_text, (300, 10))
@@ -597,30 +609,40 @@ class RendererHandler:
             
         if self.sim_paused:
             screen.blit(self.pause_text, (1250, 10))
-
 # Set up the Pygame window
 WORLD_WIDTH, WORLD_HEIGHT = 7000, 3000
 SCREEN_WIDTH, SCREEN_HEIGHT = 1400, 700
+START_X, START_Y = 1000, 2600
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption('2D Mars Lander')
 
 # Create a lander
-lander = Lander(6500, 2600, 0, 0)
-surface = Surface([(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)])
+lander = Lander(START_X, START_Y, 0, 0)
+#surface_topology = [(0, 100), (1000, 500), (1500, 1500), (3000, 1000), (4000, 150), (5500, 150), (6999, 800)])
+surface_topology = [(0, 1800), (300, 1200), (1000, 1550), (2000, 1200), (2500, 1650), (3700, 220), (4700, 220), (4750, 1000), (4700, 1650), (4000, 1700), (3700, 1600), (3750, 1900), (4000, 2100), (4900, 2050), (5100, 1000), (5500, 500), (6200, 800), (6999, 600)]
+#surface_topology = [(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)]
+surface = Surface(surface_topology)
 lander.add_to_surface(surface)
 
 clock = pygame.time.Clock()
-
-population = Population(lander, 50)
+c = [(0, -44), (4, -42), (4, -57), (4, -58), (4, -60), (4, -69), (0, -61), (4, -76), (4, -85), (4, -90), (0, -85), (4, -72), (4, -58), (4, -61), (4, -55), (3, -70), (4, -68), (4, -64), (3, -79), (0, -82), (4, -70), (4, -56), (0, -66), (3, -74), (3, -72), (4, -71), (0, -81), (4, -68), (0, -55), (0, -49), (3, -34), (4, -49), (4, -53), (4, -65), (3, -62), (4, -77), (4, -87), (4, -85), (0, -90), (0, -86), (4, -90), (4, -79), (0, -82), (0, -77), (3, -81), (0, -66), (0, -64), (4, -64), (4, -54), (4, -54), (4, -41), (4, -48), (3, -45), (4, -54), (4, -55), (0, -51), (0, -37), (0, -51), (0, -56), (4, -42), (4, -30), (4, -23), (4, -23), (0, -23), (4, -17), (0, -28), (3, -15), (4, -28), (4, -18), (4, -18), (4, -31), (4, -36), (3, -47), (4, -59), (4, -63), (3, -54), (4, -45), (4, -32), (4, -33), (4, -37), (4, -31), (4, -41), (0, -38), (4, -40), (4, -29), (4, -37), (4, -26), (4, -37), (3, -38), (3, -48), (0, -60), (0, -59), (4, -73), (4, -81), (4, -90), (4, -90), (4, -90), (0, -88), (0, -86), (4, -75), (4, -76), (4, -90), (3, -90), (4, -98), (0, -79), (4, -69), (4, -55), (4, -43), (4, -36), (4, -48), (4, -52), (0, -66), (0, -77), (4, -72), (4, -65), (4, -78), (4, -90), (3, -85), (4, -73), (4, -68), (0, -56), (3, -48), (3, -41), (4, -44), (4, -47), (4, -59), (4, -70), (3, -38), (3, -44), (0, -54), (4, -50), (0, -65), (4, -51), (3, -61), (0, -71), (4, -82), (4, -86), (4, -90), (0, -90), (4, -87), (3, -83), (3, -90), (0, -78), (0, -72), (4, -61), (4, -71), (4, -79), (4, -64), (4, -74), (4, -61), (4, -47), (4, -55), (4, -66), (4, -63), (4, -53), (3, -61), (3, -70), (3, -62), (4, -75), (0, -76), (3, -84), (4, -90), (0, -90), (3, -77), (4, -77), (4, -67), (0, -77), (4, -87), (0, -79), (0, -77), (4, -74), (4, -79), (4, -71), (4, -73), (4, -84), (4, -79), (0, -74), (4, -66), (4, -69), (0, -61), (0, -54), (3, -58), (4, -65), (4, -54), (4, -47), (4, -57), (0, -70), (3, -66), (4, -72), (4, -66), (4, -81), (3, -90), (4, -79), (4, -73), (0, -75), (3, -75), (3, -74), (4, -81), (3, -90), (4, -90)]
+#[(0, -44), (4, -42), (4, -57), (4, -58), (4, -60), (4, -69), (0, -61), (4, -76), (4, -85), (4, -90), (0, -85), (4, -72), (4, -58), (4, -61), (4, -55), (3, -70), (4, -68), (4, -64), (3, -79), (0, -82), (4, -70), (4, -56), (0, -66), (3, -74), (3, -72), (4, -71), (0, -81), (4, -68), (0, -55), (0, -49), (3, -34), (4, -49), (4, -53), (4, -65), (3, -62), (4, -77), (4, -87), (4, -85), (0, -90), (0, -86), (4, -90), (4, -79), (0, -82), (0, -77), (3, -81), (0, -66), (0, -64), (4, -64), (4, -54), (4, -54), (4, -41), (4, -48), (3, -45), (4, -54), (4, -55), (0, -51), (0, -37), (0, -51), (0, -56), (4, -42), (4, -30), (4, -23), (4, -23), (0, -23), (4, -17), (0, -28), (3, -15), (4, -28), (4, -18), (4, -18), (4, -31), (4, -36), (3, -47), (4, -59), (4, -63), (3, -54), (4, -45), (4, -32), (4, -33), (4, -37), (4, -31), (4, -41), (0, -38), (4, -40), (4, -29), (4, -37), (4, -26), (4, -37), (3, -38), (3, -48), (0, -60), (0, -59), (4, -73), (4, -81), (4, -90), (4, -90), (4, -90), (0, -88), (0, -86), (4, -75), (4, -76), (4, -90), (3, -90), (4, -98), (0, -79), (4, -69), (4, -55), (4, -43), (4, -36), (4, -48), (4, -52), (0, -66), (0, -77), (4, -72), (4, -65), (4, -78), (4, -90), (3, -85), (4, -73), (4, -68), (0, -56), (3, -48), (3, -41), (4, -44), (4, -47), (4, -59), (4, -70), (3, -38), (3, -44), (0, -54), (4, -50), (0, -65), (4, -51), (3, -61), (0, -71), (4, -82), (4, -86), (4, -90), (0, -90), (4, -87), (3, -83), (3, -90), (0, -78), (0, -72), (4, -61), (4, -71), (4, -79), (4, -64), (4, -74), (4, -61), (4, -47), (4, -55), (4, -21), (4, -29), (4, -24), (4, -21), (4, -16), (4, -17), (0, -10), (4, -16), (3, -8), (4, -23), (3, -8), (4, -12), (0, -22), (4, -23), (4, -38), (4, -43), (4, -52), (4, -59), (3, -70), (0, -61), (4, -49), (3, -53), (4, -62), (4, -52), (4, -47), (0, -55), (4, -53), (3, -55), (4, -56), (0, -50), (4, -49), (4, -45), (0, -41), (4, -34), (3, -21), (4, -28), (4, -36), (4, -29), (4, -19), (3, -31), (4, -21), (4, -12), (0, -13), (4, -12), (3, -9), (4, -2), (4, 7), (3, 17)]
+i = 0
+#population = Population(lander, 100)
+population = None
 # Run the game loop
-renderer_handler = RendererHandler(lander, surface, population, keyboard_control_mode=False)
+renderer_handler = RendererHandler(lander, surface, population, keyboard_control_mode=True)
 running = True
 while running:
     # step into either the population sim or the lander sim
     if not renderer_handler.sim_paused:
         if renderer_handler.keyboard_control_mode:
             DT = 1 # time step in seconds
-            renderer_handler.lander.step(renderer_handler.desired_angle, renderer_handler.desired_thrust, DT)
+            #renderer_handler.lander.step(renderer_handler.desired_angle, renderer_handler.desired_thrust, DT)
+            renderer_handler.lander.step(c[i][0], c[i][1], .5)
+            renderer_handler.lander.step(c[i][0], c[i][1], .5)
+            print(c[i])
+            i+=1
         else:
             population.evolve(lander)
     # Clear the screen
@@ -634,7 +656,7 @@ while running:
             # Render the lander and surface
             lander.render(screen)
             surface.render(screen)
-            time.sleep(.1)
+            time.sleep(1)
         else:
             lander.reset()
             surface.reset()
@@ -643,6 +665,8 @@ while running:
             # Render the surface
             
             for chrom in population.chromosomes:
+                if chrom.path[-1][1] < 0:
+                    print([(gene.thrust, gene.angle)for gene in chrom.genes])
                 chrom.render(screen)
             print(len(population.best_chromosome.path), len(population.chromosomes))
     else:
@@ -651,3 +675,4 @@ while running:
         
     # Update the display
     pygame.display.update()
+
