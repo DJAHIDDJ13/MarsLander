@@ -19,6 +19,16 @@ class Vector2D:
     def __sub__(self, other):
         return Vector2D(self.x - other.x, self.y - other.y)
 
+    def __eq__(self, other):
+        if isinstance(other, Vector2D):
+            return self.x == other.x and self.y == other.y
+        return NotImplemented
+
+    def __ne__(self, other):
+        if isinstance(other, Vector2D):
+            return self.x != other.x or self.y != other.y
+        return NotImplemented
+
     def __mul__(self, scalar):
         return Vector2D(self.x * scalar, self.y * scalar)
 
@@ -104,29 +114,42 @@ class Lander:
         self.surface = surface
 
     def step(self, desired_angle, desired_thrust, dt=1):
-        # Check if the lander has landed or gone out of bounds
+        # Check if the lander is out of bounds or has crashed
         if self.position.y > WORLD_HEIGHT or self.position.y < 0 or self.crashed or self.landed or self.position.x < 0 or self.position.x > WORLD_WIDTH:
-            # Stop the lander
             return False
 
-        # Update the force and angle of the thruster
+        # Calculate the difference between desired angle and current angle
         angle_change = desired_angle - self.angle
+        # Update the angle of the lander
         self.angle += -15 if angle_change <= -15 else 15 if angle_change >= 15 else angle_change
+        # Update the force of the thrusters
         self.force = desired_thrust
         # Calculate the force vector of the thruster
         thruster_force = Vector2D(0, self.force).rotate(self.angle)
         # Apply the forces of the thruster and gravity
         self.apply_force(thruster_force)
         self.apply_force(Vector2D(0, -self.GRAVITY))
-        # Update the velocity of the lander based on its acceleration
-        self.velocity += self.acceleration
-        # Update the position of the lander based on its velocity
+        # Store the original values of velocity and position
+        original_velocity = copy.copy(self.velocity)
+        original_position = copy.copy(self.position)
+        # Number of time to subdivide time step to check for collisions
+        subdivision_tries = 2
+        # Iterate over subdivisions and update the lander's position and velocity 
+        for i in range(1, subdivision_tries):
+            self.velocity += self.acceleration * (dt/subdivision_tries)
+            self.position += self.velocity * (dt/subdivision_tries)
+            self.surface.collisions_check(self)
+        # Restore original position and velocity and calculate displacement over dt
+        self.velocity = original_velocity
+        self.position = original_position
+        self.velocity += self.acceleration * dt
         self.position += self.velocity * dt
-        # Reset the acceleration of the lander
+        # Reset the acceleration to 0
         self.acceleration *= 0
+        # Check one last time for collisions at the new position
         self.surface.collisions_check(self)
-        
         return True
+
     def reset(self):
             self.__init__(6500, 2600, 0, 0)
 
@@ -139,6 +162,27 @@ class Lander:
                 break
         return path
 
+    def distance_to_landing_zone(self):
+        landing_zone_segment = self.surface.segments[lander.surface.landing_zone_index]
+        # Calculating the closest point in the landing segment to the crash zone
+        P = landing_zone_segment[0]
+        Q = landing_zone_segment[1]
+        X = lander.position
+        QP = (Q - P)
+        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
+        closest_point_to_landing_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        return (self.position - closest_point_to_landing_zone).length()
+
+    def direction_to_landing_zone(self):
+        landing_zone_segment = self.surface.segments[lander.surface.landing_zone_index]
+        # Calculating the closest point in the landing segment to the crash zone
+        P = landing_zone_segment[0]
+        Q = landing_zone_segment[1]
+        X = lander.position
+        QP = (Q - P)
+        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
+        closest_point_to_landing_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        return self.position - closest_point_to_landing_zone
     def render(self, screen):
         # Calculate the position of the landing legs
         left_landing_leg = self.position - Vector2D(0, self.LANDING_LEG_LENGTH).rotate(self.angle+self.LANDING_LEG_ANGLE)
@@ -339,22 +383,38 @@ class Chromosome:
     @classmethod
     def random_chromosome(cls, lander, num_timesteps):
         genes = []
-        for t, a in zip(random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 1, 6], k=num_timesteps-1),
-                        np.random.randint(-90, 90, size=num_timesteps-1)):
+        prev_angle = random.randint(-15, 15)
+        rand_angles = np.random.randint(-15, 15, size=num_timesteps)
+        rand_thrust = np.random.choice([2, 3, 4], p=[.1, .1, .8], size=num_timesteps)
+        for t, a in zip(rand_thrust, rand_angles):
             thrust = int(t)
-            angle = int(a)
+            angle = int(a) + prev_angle
+            angle = max(-90, angle)
+            angle = min(90, angle)
             genes.append(Gene(thrust, angle))
-        genes.append(Gene(4, 0))
+            prev_angle = angle
         chrom = cls(lander, genes)
-        chrom.run(lander)
         return chrom
 
     def mutate(self, probability=.1):
+        prev_gene = None
+        changed = False
         for i, gene in enumerate(self.genes):
-            if random.uniform(0, 1) < probability and i != len(self.genes) -1:
-                gene.thrust = random.choices([0, 1, 2, 3, 4], cum_weights=[1, 1, 1, 1, 6], k=1)[0]
-                gene.angle = random.randint(-90, 90)
-            
+            if random.uniform(0, 1) < probability:
+                changed = True
+                rand_thrust = int(np.random.choice([2, 3, 4], p=[.1, .1, .8]))
+                gene.thrust = rand_thrust
+                rand_angle = int(np.random.randint(-15, 15))
+                if i == 0:
+                    gene.angle = rand_angle
+                else:
+                    gene.angle = rand_angle + prev_gene.angle
+            prev_gene = gene
+        
+        if changed:
+            self.run(self.lander)
+    
+
     def run(self, lander):
         # Reset the lander to its initial state
         lander.reset()
@@ -362,30 +422,51 @@ class Chromosome:
         self.path = lander.run(self)
         self.landed = lander.landed
         self.crashed = lander.crashed
-        landing_zone_segment = lander.surface.segments[lander.surface.landing_zone_index]
 
-        # Calculating the closest point in the landing segment to the crash zone
-        P = landing_zone_segment[0]
-        Q = landing_zone_segment[1]
-        X = lander.position
-        QP = (Q - P)
-        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
-        closest_point_to_crash_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
-        self.distance_from_landing_zone = (lander.position - distance_from_landing_zone).length()
+        self.distance_from_landing_zone = lander.distance_to_landing_zone()
         self.crash_speed = copy.deepcopy(lander.velocity)
+        
+        crash_pos = lander.position
+        self.crash_pos = crash_pos
+        landing_zone_segment = lander.surface.segments[lander.surface.landing_zone_index]
+        line_of_sight_segment = (crash_pos, (landing_zone_segment[0] + landing_zone_segment[1]) / 2)
+        self.line_of_sight = True
+        crashes = []
+        for i, segment in enumerate(lander.surface.segments):
+            if i != lander.surface.landing_zone_index:
+                if lander.surface.collides_with_segment(line_of_sight_segment, segment)[0]:
+                    crashes += [i]
+                    self.line_of_sight = False
+                    break
         self.fitness = self.calc_fitness()
-    
+
     def calc_fitness(self):
         # Calculate the fitness based on the distance from the crash zone
         # and the length of the run
-        distance_from_landing_zone = self.distance_from_landing_zone
-        fitness = 500 - distance_from_crash_zone /20\
-                      - abs(self.crash_speed.x) \
-                      - abs(self.crash_speed.y)/2 
-#                      + len(self.path) * 2
+
+        # normalize the distance to ~0-1
+        distance_from_landing_zone = (self.distance_from_landing_zone / WORLD_WIDTH / 2 )**2
+        crash_speed_x = abs(self.crash_speed.x) 
+        crash_speed_y = abs(self.crash_speed.y)
+
+        fitness = 700
+
+        if self.distance_from_landing_zone < 10:
+            fitness = 1000
+            fitness -= crash_speed_x  + crash_speed_y 
+
+        fitness -= distance_from_landing_zone * 500
+        
+        # Check line of sight from crash zone to landing zone
+        if self.line_of_sight:
+            # If there's a line of sight, give a bonus to the fitness
+            fitness += 500
+
         # If the lander crashed or went out of bounds, give it a low fitness
         if self.landed:
-            fitness = 1000
+            fitness += 1000
+        if self.crashed:
+            fitness -= 500
         return fitness
 
     def render(self, screen):
@@ -743,56 +824,3 @@ while True:
         break
 
 lander_env.close()
-
-"""
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption('2D Mars Lander')
-
-# Create a lander
-lander = Lander(6500, 2600, 0, 0)
-surface = Surface([(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)])
-lander.add_to_surface(surface)
-
-clock = pygame.time.Clock()
-
-population = Population(lander, 50)
-# Run the game loop
-renderer_handler = RendererHandler(lander, surface, population, keyboard_control_mode=False)
-running = True
-while running:
-    # step into either the population sim or the lander sim
-    if not renderer_handler.sim_paused:
-        if renderer_handler.keyboard_control_mode:
-            DT = 1 # time step in seconds
-            renderer_handler.lander.step(renderer_handler.desired_angle, renderer_handler.desired_thrust, DT)
-        else:
-            population.evolve(lander)
-    # Clear the screen
-    screen.fill((0, 0, 0))
-    # Handle events
-    renderer_handler.handle_events()
-    renderer_handler.render_debug()
-    
-    if not renderer_handler.sim_paused:
-        if renderer_handler.keyboard_control_mode:
-            # Render the lander and surface
-            lander.render(screen)
-            surface.render(screen)
-            time.sleep(.1)
-        else:
-            lander.reset()
-            surface.reset()
-            lander.render(screen)
-            surface.render(screen)
-            # Render the surface
-            
-            for chrom in population.chromosomes:
-                chrom.render(screen)
-            print(len(population.best_chromosome.path), len(population.chromosomes))
-    else:
-        lander.render(screen)
-        surface.render(screen)
-        
-    # Update the display
-    pygame.display.update()
-"""
