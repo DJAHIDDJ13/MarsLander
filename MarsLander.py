@@ -5,6 +5,19 @@ import random
 import numpy as np
 import copy
 import gym
+import math
+import matplotlib
+import matplotlib.pyplot as plt
+from collections import namedtuple, deque
+from itertools import count
+import pickle as pkl
+import os
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
 
 class Vector2D:
     def __init__(self, *args):
@@ -52,7 +65,7 @@ class Vector2D:
         raise IndexError
 
     def __repr__(self):
-        return f"({self.x}, {self.y})"    
+        return f"({self.x}, {self.y})"
 
     def rotate(self, angle):
         radians = math.radians(angle)
@@ -62,22 +75,30 @@ class Vector2D:
         y = self.x * sin_val + self.y * cos_val
         return Vector2D(x, y)
 
+    def angle_to(self, other):
+        # Calculate the angle between self and other
+        angle = math.degrees(math.atan2(other.y - self.y, other.x - self.x))
+
+        # Return a rotated vector pointing in the direction of other
+        return angle
+
     def length(self):
         return math.sqrt(self.x ** 2 + self.y ** 2)
-    
+
     def dot(self, other):
         return self.x * other.x + self.y * other.y
-    
+
     def normalize(self):
         length = self.length()
         if length > 0:
             return self / length
         return Vector2D(0, 0)
-    
+
     @staticmethod
     def remap_scalar(x, old_min, old_max, new_min, new_max):
         return (x - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
-    
+
+
 class Lander:
     def __init__(self, init_position, init_velocity):
         # Constants
@@ -92,7 +113,7 @@ class Lander:
         self.body_collision = False
         self.left_leg_collision = False
         self.right_leg_collision = False
-        
+
         # Initial position and velocity of the lander
         self.position = init_position
         self.velocity = init_velocity
@@ -103,10 +124,15 @@ class Lander:
 
         # disntance sensors spread out uniformly in circular pattern each one calculates the distance to the nearest surface (including map limits)
         self.num_distance_sensors = 8
-        self.distance_sensors_angles = [Vector2D.remap_scalar(i, 0, self.num_distance_sensors, 0, 360) for i in range(self.num_distance_sensors)]
-        self.distance_sensors_values = [-1 for _ in range(self.num_distance_sensors)]
-        self.distance_sensors_collisions = [None for _ in range(self.num_distance_sensors)]
-    
+        self.distance_sensors_angles = [Vector2D.remap_scalar(
+            i, 0, self.num_distance_sensors, 0, 360) for i in range(self.num_distance_sensors)]
+        self.distance_sensors_values = [
+            -1 for _ in range(self.num_distance_sensors)]
+        self.distance_sensors_collisions = [
+            None for _ in range(self.num_distance_sensors)]
+
+        self.state = np.zeros((4+self.num_distance_sensors))
+
     def apply_force(self, force):
         self.acceleration += force
 
@@ -121,7 +147,8 @@ class Lander:
         # Calculate the difference between desired angle and current angle
         angle_change = desired_angle - self.angle
         # Update the angle of the lander
-        self.angle += -15 if angle_change <= -15 else 15 if angle_change >= 15 else angle_change
+        self.angle += -15 if angle_change <= - \
+            15 else 15 if angle_change >= 15 else angle_change
         # Update the force of the thrusters
         self.force = desired_thrust
         # Calculate the force vector of the thruster
@@ -134,7 +161,7 @@ class Lander:
         original_position = copy.copy(self.position)
         # Number of time to subdivide time step to check for collisions
         subdivision_tries = 2
-        # Iterate over subdivisions and update the lander's position and velocity 
+        # Iterate over subdivisions and update the lander's position and velocity
         for i in range(1, subdivision_tries):
             self.velocity += self.acceleration * (dt/subdivision_tries)
             self.position += self.velocity * (dt/subdivision_tries)
@@ -148,54 +175,59 @@ class Lander:
         self.acceleration *= 0
         # Check one last time for collisions at the new position
         self.surface.collisions_check(self)
+        if self.position.x <= self.LANDER_RADIUS or self.position.x >= WORLD_WIDTH-self.LANDER_RADIUS or\
+                self.position.y <= self.LANDER_RADIUS or self.position.y >= WORLD_HEIGHT-self.LANDER_RADIUS:
+            self.crashed = True
         return True
 
     def reset(self):
-            self.__init__(6500, 2600, 0, 0)
-
-    def run(self, chromosome):
-        path = []
-        for gene in chromosome.genes:
-            self.step(gene.angle, gene.thrust, 1)
-            path.append([lander.position.x, lander.position.y, lander.velocity.x, lander.velocity.y])
-            if self.crashed or self.landed:
-                break
-        return path
+        self.__init__(INIT_POSITION, INIT_VELOCITY)
 
     def distance_to_landing_zone(self):
-        landing_zone_segment = self.surface.segments[lander.surface.landing_zone_index]
+        landing_zone_segment = self.surface.segments[self.surface.landing_zone_index]
         # Calculating the closest point in the landing segment to the crash zone
         P = landing_zone_segment[0]
         Q = landing_zone_segment[1]
-        X = lander.position
+        X = self.position
         QP = (Q - P)
-        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
-        closest_point_to_landing_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        # calculating the projection of X onto segment [P,Q]
+        ds = (X - P).dot(QP) / QP.dot(QP)
+        closest_point_to_landing_zone = P + ds * \
+            QP if 0 < ds < 1 else P if ds <= 0 else Q
         return (self.position - closest_point_to_landing_zone).length()
 
     def direction_to_landing_zone(self):
-        landing_zone_segment = self.surface.segments[lander.surface.landing_zone_index]
+        landing_zone_segment = self.surface.segments[self.surface.landing_zone_index]
         # Calculating the closest point in the landing segment to the crash zone
         P = landing_zone_segment[0]
         Q = landing_zone_segment[1]
-        X = lander.position
+        X = self.position
         QP = (Q - P)
-        ds = (X - P).dot(QP) / QP.dot(QP) # calculating the projection of X onto segment [P,Q]
-        closest_point_to_landing_zone = P + ds * QP if 0 < ds < 1 else P if ds <= 0 else Q
+        # calculating the projection of X onto segment [P,Q]
+        ds = (X - P).dot(QP) / QP.dot(QP)
+        closest_point_to_landing_zone = P + ds * \
+            QP if 0 < ds < 1 else P if ds <= 0 else Q
         return self.position - closest_point_to_landing_zone
+
     def render(self, screen):
         # Calculate the position of the landing legs
-        left_landing_leg = self.position - Vector2D(0, self.LANDING_LEG_LENGTH).rotate(self.angle+self.LANDING_LEG_ANGLE)
-        right_landing_leg = self.position - Vector2D(0, self.LANDING_LEG_LENGTH).rotate(self.angle-self.LANDING_LEG_ANGLE)
+        left_landing_leg = self.position - \
+            Vector2D(0, self.LANDING_LEG_LENGTH).rotate(
+                self.angle+self.LANDING_LEG_ANGLE)
+        right_landing_leg = self.position - \
+            Vector2D(0, self.LANDING_LEG_LENGTH).rotate(
+                self.angle-self.LANDING_LEG_ANGLE)
 
         pygame.draw.line(screen,
-                        (255, 0, 0) if self.left_leg_collision else (255, 255, 255),
-                        world_to_screen(self.position),
-                        world_to_screen(left_landing_leg), 2)
+                         (255, 0, 0) if self.left_leg_collision else (
+                             255, 255, 255),
+                         world_to_screen(self.position),
+                         world_to_screen(left_landing_leg), 2)
         pygame.draw.line(screen,
-                        (255, 0, 0) if self.right_leg_collision else (255, 255, 255),
-                        world_to_screen(self.position),
-                        world_to_screen(right_landing_leg), 2)
+                         (255, 0, 0) if self.right_leg_collision else (
+                             255, 255, 255),
+                         world_to_screen(self.position),
+                         world_to_screen(right_landing_leg), 2)
         # Draw the lander body
         pygame.draw.circle(screen,
                            (255, 0, 0) if self.body_collision else (255, 255, 255),
@@ -203,14 +235,61 @@ class Lander:
                            scalar_world_to_screen(self.LANDER_RADIUS))
         for i, a in enumerate(self.distance_sensors_angles):
             pygame.draw.line(screen,
-                            (255, 255, 0),
-                            world_to_screen(self.position),
-                            world_to_screen(self.position + Vector2D(7000, 0).rotate(a)), 2)
+                             (255, 255, 0),
+                             world_to_screen(self.position),
+                             world_to_screen(self.position + Vector2D(7000, 0).rotate(a)), 2)
             if self.distance_sensors_collisions[i] is not None:
                 pygame.draw.circle(screen,
-                       (0, 255, 0),
-                       world_to_screen(self.distance_sensors_collisions[i]),
-                       5)
+                                   (0, 255, 0),
+                                   world_to_screen(
+                                       self.distance_sensors_collisions[i]),
+                                   5)
+
+        sensor_debug_pos = Vector2D(300, 2800)
+        # Draw the sensor data in the corner of the screen
+        pygame.draw.circle(screen, (150, 150, 150),
+                           world_to_screen(sensor_debug_pos),
+                           scalar_world_to_screen(100))
+        for i, a in enumerate(self.distance_sensors_angles):
+            length = min(2000, self.distance_sensors_values[i]) / 2000
+            end = world_to_screen(sensor_debug_pos) +\
+                Vector2D(length * scalar_world_to_screen(100), 0).rotate(-a)
+            pygame.draw.line(screen, (255, 0, 255),
+                             world_to_screen(sensor_debug_pos), end, 2)
+
+        landing_debug_pos = Vector2D(500, 2800)
+        landing_direction = self.direction_to_landing_zone().normalize()*100
+        arrow_length = 50
+        arrow_head_length = 10
+        arrow_head_width = 5
+
+        # Calculate the positions of the two points that make up the arrow head
+
+        arrow_tail = world_to_screen(sensor_debug_pos)
+        arrow_head = world_to_screen(
+            sensor_debug_pos + landing_direction * arrow_length)
+        left_tip = arrow_head + Vector2D(-arrow_head_width, -arrow_head_length).rotate(
+            landing_direction.angle_to(Vector2D(1, 0)))
+        right_tip = arrow_head + Vector2D(arrow_head_width, -arrow_head_length).rotate(
+            landing_direction.angle_to(Vector2D(1, 0)))
+        # Draw the arrow
+        pygame.draw.line(screen, (0, 0, 255), world_to_screen(landing_debug_pos),
+                         world_to_screen(landing_debug_pos + landing_direction), 2)
+#        points = [arrow_tail, left_tip, right_tip]
+#        pygame.draw.polygon(screen, (0, 255, 0), points, 0)
+
+    def get_state(self):
+        return self.state
+
+    def calc_state(self):
+        dir_to_land = self.direction_to_landing_zone()
+        dir_info = [self.velocity.x, self.velocity.y,
+                    dir_to_land.x,   dir_to_land.y]
+        # Clipping the distance sensors to 1000 distance and then normalizing
+        sensors = [min(2000, d) / 2000 for d in self.distance_sensors_values]
+        for i, val in enumerate(dir_info + sensors):
+            self.state[i] = val
+
 
 class Surface:
     def __init__(self, points):
@@ -225,20 +304,25 @@ class Surface:
                 self.landing_zone_index = i
             self.collisions.append(False)
         self.segments.extend([(Vector2D(0, 0), Vector2D(0, WORLD_HEIGHT)),
-                         (Vector2D(0, WORLD_HEIGHT), Vector2D(WORLD_WIDTH, WORLD_HEIGHT)),
-                         (Vector2D(WORLD_WIDTH, 0), Vector2D(WORLD_WIDTH, WORLD_HEIGHT))])
-        
+                              (Vector2D(0, WORLD_HEIGHT), Vector2D(
+                                  WORLD_WIDTH, WORLD_HEIGHT)),
+                              (Vector2D(WORLD_WIDTH, 0), Vector2D(WORLD_WIDTH, WORLD_HEIGHT))])
+
     def collisions_check(self, lander):
         lander.right_leg_collision = False
         lander.left_leg_collision = False
         lander.body_collision = False
-        lander.distance_sensors_values = [99999 for _ in range(lander.num_distance_sensors)]
-        lander.distance_sensors_collisions = [None for _ in range(lander.num_distance_sensors)]
+        lander.distance_sensors_values = [
+            99999 for _ in range(lander.num_distance_sensors)]
+        lander.distance_sensors_collisions = [
+            None for _ in range(lander.num_distance_sensors)]
         for i, segment in enumerate(self.segments):
             self.collisions[i] = self.collides_with_lander(lander, segment)
             for j, distance_sensor_angle in enumerate(lander.distance_sensors_angles):
-                ds_segment = (lander.position, lander.position + Vector2D(WORLD_WIDTH, 0).rotate(distance_sensor_angle))
-                hit, collision_point = self.collides_with_segment(segment, ds_segment)
+                ds_segment = (lander.position, lander.position +
+                              Vector2D(WORLD_WIDTH, 0).rotate(distance_sensor_angle))
+                hit, collision_point = self.collides_with_segment(
+                    segment, ds_segment)
                 temp_dist = (lander.position - collision_point).length()
                 if hit and lander.distance_sensors_values[j] > temp_dist:
                     lander.distance_sensors_values[j] = temp_dist
@@ -254,17 +338,18 @@ class Surface:
             lander.crashed = True
             lander.landed = False
             break
-                        
-            
+
     def collides_with_lander(self, lander, segment):
         # Get the start and end points of the segment
         p1, p2 = segment
-        
+
         # Calculate the distance between the lander's position and the segment
         distance = self.distance_to_segment(lander.position, p1, p2)
 
-        rleg_segment = (lander.position, lander.position - Vector2D(0, lander.LANDING_LEG_LENGTH).rotate(lander.angle - lander.LANDING_LEG_ANGLE))
-        lleg_segment = (lander.position, lander.position - Vector2D(0, lander.LANDING_LEG_LENGTH).rotate(lander.angle + lander.LANDING_LEG_ANGLE))
+        rleg_segment = (lander.position, lander.position - Vector2D(
+            0, lander.LANDING_LEG_LENGTH).rotate(lander.angle - lander.LANDING_LEG_ANGLE))
+        lleg_segment = (lander.position, lander.position - Vector2D(
+            0, lander.LANDING_LEG_LENGTH).rotate(lander.angle + lander.LANDING_LEG_ANGLE))
 
         rleg_collision, _ = self.collides_with_segment(segment, rleg_segment)
         lleg_collision, _ = self.collides_with_segment(segment, lleg_segment)
@@ -314,8 +399,8 @@ class Surface:
             b2 = p3.y - m2 * p3.x  # y-intercept of segment 2
             y = m2 * p1.x + b2  # y-coordinate of intersection
             # Check if the intersection point is on both segments
-            if min(p1.y,p2.y) <= y <= max(p1.y,p2.y) and min(p4.y,p3.y) <= y <= max(p4.y,p3.y):
-                if min(p3.x,p4.x) <= p1.x <= max(p3.x,p4.x):
+            if min(p1.y, p2.y) <= y <= max(p1.y, p2.y) and min(p4.y, p3.y) <= y <= max(p4.y, p3.y):
+                if min(p3.x, p4.x) <= p1.x <= max(p3.x, p4.x):
                     return True, Vector2D(p1.x, y)
         elif abs(p3.x - p4.x) < .0001:  # segment 2 is vertical
             # Find the intersection of segment 2 with segment 1
@@ -323,8 +408,8 @@ class Surface:
             b1 = p1.y - m1 * p1.x  # y-intercept of segment 1
             y = m1 * p3.x + b1  # y-coordinate of intersection
             # Check if the intersection point is on both segments
-            if min(p1.y,p2.y) <= y <= max(p1.y,p2.y) and min(p4.y,p3.y) <= y <= max(p4.y,p3.y):
-                if min(p1.x,p2.x) <= p3.x <= max(p1.x,p2.x):
+            if min(p1.y, p2.y) <= y <= max(p1.y, p2.y) and min(p4.y, p3.y) <= y <= max(p4.y, p3.y):
+                if min(p1.x, p2.x) <= p3.x <= max(p1.x, p2.x):
                     return True, Vector2D(p3.x, y)
         else:
             # Convert the line segments to the form y = mx + b
@@ -350,7 +435,7 @@ class Surface:
                         return True, p1
 
         return False, Vector2D(99999, 99999)
-    
+
     def reset(self):
         self.collisions = [False for _ in range(len(self.segments))]
 
@@ -359,7 +444,7 @@ class Surface:
         for segment, collided in zip(self.segments, self.collisions):
             start, end = segment
             line_color = (255, 255, 255)
-            #print(lander)
+            # print(lander)
             if collided:
                 line_color = (255, 0, 0)
             elif i == self.landing_zone_index:
@@ -367,354 +452,60 @@ class Surface:
             pygame.draw.line(screen, line_color,
                              world_to_screen(start),
                              world_to_screen(end), 2)
-            i+=1
-        
-class Gene:
-    def __init__(self, thrust, angle):
-        self.thrust = thrust
-        self.angle = angle
+            i += 1
 
-class Chromosome:
-    def __init__(self, lander, genes):
-        self.genes = genes
-        self.fitness = 0
-        self.run(lander)
-
-    @classmethod
-    def random_chromosome(cls, lander, num_timesteps):
-        genes = []
-        prev_angle = random.randint(-15, 15)
-        rand_angles = np.random.randint(-15, 15, size=num_timesteps)
-        rand_thrust = np.random.choice([2, 3, 4], p=[.1, .1, .8], size=num_timesteps)
-        for t, a in zip(rand_thrust, rand_angles):
-            thrust = int(t)
-            angle = int(a) + prev_angle
-            angle = max(-90, angle)
-            angle = min(90, angle)
-            genes.append(Gene(thrust, angle))
-            prev_angle = angle
-        chrom = cls(lander, genes)
-        return chrom
-
-    def mutate(self, probability=.1):
-        prev_gene = None
-        changed = False
-        for i, gene in enumerate(self.genes):
-            if random.uniform(0, 1) < probability:
-                changed = True
-                rand_thrust = int(np.random.choice([2, 3, 4], p=[.1, .1, .8]))
-                gene.thrust = rand_thrust
-                rand_angle = int(np.random.randint(-15, 15))
-                if i == 0:
-                    gene.angle = rand_angle
-                else:
-                    gene.angle = rand_angle + prev_gene.angle
-            prev_gene = gene
-        
-        if changed:
-            self.run(self.lander)
-    
-
-    def run(self, lander):
-        # Reset the lander to its initial state
-        lander.reset()
-        # Set the path of the lander to the genes in this chromosome
-        self.path = lander.run(self)
-        self.landed = lander.landed
-        self.crashed = lander.crashed
-
-        self.distance_from_landing_zone = lander.distance_to_landing_zone()
-        self.crash_speed = copy.deepcopy(lander.velocity)
-        
-        crash_pos = lander.position
-        self.crash_pos = crash_pos
-        landing_zone_segment = lander.surface.segments[lander.surface.landing_zone_index]
-        line_of_sight_segment = (crash_pos, (landing_zone_segment[0] + landing_zone_segment[1]) / 2)
-        self.line_of_sight = True
-        crashes = []
-        for i, segment in enumerate(lander.surface.segments):
-            if i != lander.surface.landing_zone_index:
-                if lander.surface.collides_with_segment(line_of_sight_segment, segment)[0]:
-                    crashes += [i]
-                    self.line_of_sight = False
-                    break
-        self.fitness = self.calc_fitness()
-
-    def calc_fitness(self):
-        # Calculate the fitness based on the distance from the crash zone
-        # and the length of the run
-
-        # normalize the distance to ~0-1
-        distance_from_landing_zone = (self.distance_from_landing_zone / WORLD_WIDTH / 2 )**2
-        crash_speed_x = abs(self.crash_speed.x) 
-        crash_speed_y = abs(self.crash_speed.y)
-
-        fitness = 700
-
-        if self.distance_from_landing_zone < 10:
-            fitness = 1000
-            fitness -= crash_speed_x  + crash_speed_y 
-
-        fitness -= distance_from_landing_zone * 500
-        
-        # Check line of sight from crash zone to landing zone
-        if self.line_of_sight:
-            # If there's a line of sight, give a bonus to the fitness
-            fitness += 500
-
-        # If the lander crashed or went out of bounds, give it a low fitness
-        if self.landed:
-            fitness += 1000
-        if self.crashed:
-            fitness -= 500
-        return fitness
-
-    def render(self, screen):
-        for p1, p2 in zip(self.path, self.path[1:]):
-            pygame.draw.line(screen, (0, 0, 255),
-                             world_to_screen(Vector2D(p1[0], p1[1])),
-                             world_to_screen(Vector2D(p2[0], p2[1])), 2)
-
-class Population:
-    def __init__(self, lander, size):
-        NUM_TIMESTEPS = 150
-        self.chromosomes = [Chromosome.random_chromosome(lander, NUM_TIMESTEPS) for _ in range(size)]
-        self.best_chromosome = self.chromosomes[0]
-        self.generation_num = 0
-
-    def selection2(self, retain_probability=.5, random_select_probability=.7):
-        # Calculate the total fitness of all the chromosomes
-        total_fitness = sum(chromosome.fitness for chromosome in self.chromosomes)
-        
-        # Normalize the fitness values to be between 0 and 1
-        normalized_fitnesses = [(chromosome.fitness - min(self.chromosomes, key=lambda x: x.fitness).fitness) / (1000 - (-2000))
-                                for chromosome in self.chromosomes]
-        
-        # Calculate the probability of selecting each chromosome
-        selection_probabilities = [fitness / total_fitness for fitness in normalized_fitnesses]
-        
-        # Sort the chromosomes by fitness
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-            
-        # Select the chromosomes to be retained
-        parents = []
-        for chromosome, probability in zip(self.chromosomes, selection_probabilities):
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
-            retain_probability -= probability
-            if retain_probability < 0:
-                break
-        
-        return parents
-    
-    def selection(self, retain_probability=.5, random_select_probability=.7):
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-        retain_length = int(len(self.chromosomes) * retain_probability)
-        parents = self.chromosomes[:retain_length]
-        for chromosome in self.chromosomes[retain_length:]:
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
-        return parents
-
-    def crossover(self, parents, children_size):
-        children = []
-        desired_length = children_size - len(parents)
-        while len(children) < desired_length:
-            male = random.randint(0, len(parents) - 1)
-            female = random.randint(0, len(parents) - 1)
-            if male != female:
-                male = parents[male]
-                female = parents[female]
-                half = len(male.genes) // 2
-                child_genes = male.genes[:half] + female.genes[half:]
-                children.append(Chromosome(lander, child_genes))
-        return children
-
-    def evolve2(self, lander, retain_probability=.4, random_select_probability=.5, mutation_probability=.3):
-        self.generation_num += 1
-        parents = self.selection(retain_probability, random_select_probability)
-        children = self.crossover(parents, len(self.chromosomes))
-        for child in children:
-            child.mutate(mutation_probability)
-        parents.extend(children)
-        self.chromosomes = parents
-
-    def evolve(self, lander, retain_probability=.25, random_select_probability=.3, mutation_probability=.4):
-        self.generation_num += 1
-        self.chromosomes.sort(key=lambda x: x.fitness, reverse=True)
-        if self.chromosomes[0].fitness > self.best_chromosome.fitness:
-            self.best_chromosome = copy.deepcopy(self.chromosomes[0])
-        retain_length = int(len(self.chromosomes) * retain_probability)
-        parents = self.chromosomes[:retain_length]
-        for chromosome in self.chromosomes[retain_length:]:
-            if random_select_probability > random.uniform(0, 1):
-                parents.append(chromosome)
-        children = []
-        desired_length = len(self.chromosomes) - len(parents)
-        while len(children) < desired_length:
-            male = random.randint(0, len(parents) - 1)
-            female = random.randint(0, len(parents) - 1)
-            if male != female:
-                male = parents[male]
-                female = parents[female]
-                half = (len(male.path) + len(female.path)) // 4
-                if self.generation_num > 50:
-                    female.mutate(.6)
-                child_genes = male.genes[:half] + female.genes[half:]
-                child = Chromosome(lander, child_genes)
-                child.mutate(mutation_probability)
-                children.append(child)
-        parents.extend(children)
-        self.chromosomes = parents
-
-class NeuralNetwork:
-    def __init__(self, input_size, hidden_size, output_size):
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-
-        # Initialize the weights and biases for the hidden and output layers
-        self.weights_input_hidden = np.random.randn(self.input_size, self.hidden_size)
-        self.biases_hidden = np.random.randn(self.hidden_size)
-        self.weights_hidden_output = np.random.randn(self.hidden_size, self.output_size)
-        self.biases_output = np.random.randn(self.output_size)
-
-    def forward(self, input):
-        # Propagate the input through the hidden layer using the weights and biases
-        hidden = np.dot(input, self.weights_input_hidden) + self.biases_hidden
-        # Apply the ReLU activation function to the hidden layer output
-        hidden = np.maximum(hidden, 0)
-
-        # Propagate the hidden layer output through the output layer using the weights and biases
-        output = np.dot(hidden, self.weights_hidden_output) + self.biases_output
-        return output
 
 def world_to_screen(point):
     pointx = Vector2D.remap_scalar(point.x, 0, WORLD_WIDTH,
-                                            0, SCREEN_WIDTH)
+                                   0, SCREEN_WIDTH)
     pointy = Vector2D.remap_scalar(point.y, 0, WORLD_HEIGHT,
-                                            0, SCREEN_HEIGHT)
+                                   0, SCREEN_HEIGHT)
     pointy = SCREEN_HEIGHT - pointy
     return Vector2D(pointx, pointy)
 
+
 def scalar_world_to_screen(n):
     return Vector2D.remap_scalar(n, 0, WORLD_HEIGHT,
-                                    0, SCREEN_HEIGHT)
+                                 0, SCREEN_HEIGHT)
 
-class RendererHandler:
-    def __init__(self, lander, surface, poplation, keyboard_control_mode=True):
-        self.population = population
-        self.lander = lander
-        self.surface = surface
-
-        self.sim_paused = True
-        self.sim_running = True
-        self.show_debug = True
-        
-        pygame.font.init()
-        self.debug_font = pygame.font.SysFont('Monospace', 12)
-        self.pause_text = self.debug_font.render(f"SIM PAUSED", False, (235, 0, 0))
-        self.debug_info_text = self.debug_font.render(f"PRESS F3 TO SHOW DEBUG INFO", False, (255, 255, 255))
-        self.desired_angle = 0
-        self.desired_thrust = 0
-        self.keyboard_control_mode = keyboard_control_mode
-        self.show_debug = True
-
-    def handle_events(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.sim_running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_LEFT:
-                    self.desired_angle = 60
-                elif event.key == pygame.K_RIGHT:
-                    self.desired_angle = -60
-                elif event.key == pygame.K_UP:
-                    self.desired_thrust = 8
-                elif event.key == pygame.K_DOWN:
-                    self.desired_thrust = 0
-                elif event.key == pygame.K_SPACE:
-                    self.sim_paused = not self.sim_paused
-                elif event.key == pygame.K_F5:
-                    # Reset the lander and surface
-                    lander.reset()
-                    surface.reset()
-                elif event.key == pygame.K_F3:
-                    self.show_debug = not self.show_debug
-            elif event.type == pygame.KEYUP:
-                # Reset the desired angle and thrust when the keys are released
-                self.desired_angle = 0
-                self.desired_thrust = 0
-
-    def render_debug(self):
-        if self.show_debug:
-            if self.keyboard_control_mode:
-                pos_debug_text = self.debug_font.render(f"POSITION {int(lander.position.x):>6}", False, (255, 255, 255))
-                alt_debug_text = self.debug_font.render(f"ALTITUDE {int(lander.position.y):>6}", False, (255, 255, 255))
-
-                velx_debug_text = self.debug_font.render(f"HORIZONTAL SPEED {int(lander.velocity.x):>6}", False, (255, 255, 255))
-                velyt_debug_text = self.debug_font.render(f"VERTICAL   SPEED {int(lander.velocity.y):>6}", False, (255, 255, 255))
-
-                landed_text = self.debug_font.render(f"LANDED {lander.landed}", False, (255, 255, 255))
-                crashed_text = self.debug_font.render(f"CRASHED {lander.crashed}", False, (255, 255, 255))
-
-
-                screen.blit(pos_debug_text, (10, 10))
-                screen.blit(alt_debug_text, (10, 20))
-                screen.blit(velx_debug_text, (300, 10))
-                screen.blit(velyt_debug_text, (300, 20))
-                screen.blit(landed_text, (1250, 20))
-                screen.blit(crashed_text, (1250, 30))
-            else:
-                generation_text = self.debug_font.render(f"GENERATION {population.generation_num:>6}", False, (255, 255, 255))
-                generation_ptext = self.debug_font.render(f"POPULATION {len(self.population.chromosomes):>6}", False, (255, 255, 255))
-                generation_btext = self.debug_font.render(f"BEST FITNESS {self.population.best_chromosome.fitness:<6}", False, (255, 255, 255))
-                fits = [c.fitness for c in self.population.chromosomes]
-                generation_avgtext = self.debug_font.render(f"AVG FITNESS {sum(fits)//len(fits):<6}", False, (255, 255, 255))
-
-                screen.blit(generation_text, (1250, 40))
-                screen.blit(generation_ptext, (1250, 50))
-                screen.blit(generation_btext, (1250, 60))
-                screen.blit(generation_avgtext, (1250, 70))
-        else:
-            screen.blit(self.debug_info_text, (1250, 20))
-            
-        if self.sim_paused:
-            screen.blit(self.pause_text, (1250, 10))
 
 class MarsLanderEnv(gym.Env):
     metadata = {
         "render_modes": ["human", "rgb_array"],
         "render_fps": 60,
     }
-    def __init__(self, init_position, init_velocity, surface_topology, render_mode='human'):
+
+    def __init__(self, init_position, init_velocity, surface_topology, render_mode='rgb_array'):
         self.lander = Lander(init_position, init_velocity)
         self.surface = Surface(surface_topology)
         self.lander.add_to_surface(self.surface)
-        low_pos = np.array([0, 0], dtype=np.float32)
-        high_pos = np.array([7000, 3000], dtype=np.float32)
+        #low_pos = np.array([0, 0], dtype=np.float32)
+        #high_pos = np.array([7000, 3000], dtype=np.float32)
         low_vel = np.array([-1000, -1000], dtype=np.float32)
         high_vel = np.array([1000, 1000], dtype=np.float32)
-        low_angle = np.array([-90], dtype=np.float32)
-        high_angle = np.array([90], dtype=np.float32)
-        low_thrust = np.array([0], dtype=np.float32)
-        high_thrust = np.array([4], dtype=np.float32)
-        low_sensors = np.zeros(self.lander.num_distance_sensors, dtype=np.float32)
-        high_sensors = np.full(self.lander.num_distance_sensors, 7000, dtype=np.float32)
-        low = np.concatenate((low_pos, low_vel, low_angle, low_thrust, low_sensors))
-        high = np.concatenate((high_pos, high_vel, high_angle, high_thrust, high_sensors))
-        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
-        self.action_space = gym.spaces.Box(low=np.array([0, -90]), high=np.array([4, 90]), dtype=np.int32)
+#        low_angle = np.array([-90], dtype=np.float32)
+#        high_angle = np.array([90], dtype=np.float32)
+#        low_thrust = np.array([2], dtype=np.float32)
+#        high_thrust = np.array([4], dtype=np.float32)
+        low_dir = np.array([-4000, -4000], dtype=np.float32)
+        high_dir = np.array([4000, 4000], dtype=np.float32)
+        low_sensors = np.zeros(
+            self.lander.num_distance_sensors, dtype=np.float32)
+        high_sensors = np.full(
+            self.lander.num_distance_sensors, 1, dtype=np.float32)
+        low = np.concatenate(
+            (low_vel, low_dir, low_sensors))
+        high = np.concatenate(
+            (high_vel, high_dir, high_sensors))
+        self.observation_space = gym.spaces.Box(
+            low=low, high=high, dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=np.array(
+            [3, -6]), high=np.array([4, 6]), dtype=np.int32)
 
         self.screen = None
         self.render_mode = render_mode
         self.clock = None
-        
+
     def reset(self):
         self.lander.reset()
         self.surface.reset()
@@ -722,30 +513,30 @@ class MarsLanderEnv(gym.Env):
 
         if self.render_mode == "human":
             self.render()
-        return self.lander.get_state()
-    
+        info = {}
+        return self.lander.get_state(), info
+
     def step(self, action):
+        thrust = action // (6 + 6 + 1) + 3
+        angle = (action % (6 + 6 + 1) - 6) * 15
+        action = [thrust, angle]
         self.lander.step(action[1], action[0])
-        pos = self.lander.position
-        vel = self.lander.velocity
-        state = [
-            pos.x,
-            pos.y,
-            vel.x,
-            vel.y,
-            self.lander.angle,
-            self.lander.force
-        ]
-        state.extend(self.lander.distance_sensors_values)
 
-        assert len(state) == 6 + self.lander.num_distance_sensors
-        
-        reward = 3000
+        state = self.lander.get_state()
+        assert len(state) == 4 + self.lander.num_distance_sensors
+
+        reward = 2000
         landing_zone_segment = self.surface.segments[self.surface.landing_zone_index]
-        landing_zone_midpoint = (landing_zone_segment[0] + landing_zone_segment[1])/2
-        distance_from_landing_zone = (self.lander.position - landing_zone_midpoint).length()
-        reward -= distance_from_landing_zone
+        landing_zone_midpoint = (
+            landing_zone_segment[0] + landing_zone_segment[1])/2
+        distance_from_landing_zone = (
+            self.lander.position - landing_zone_midpoint).length()
+        reward -= distance_from_landing_zone / 2
+        reward -= abs(self.lander.velocity.x)
+        reward -= abs(self.lander.velocity.y)/2
 
+        if self.lander.landed:
+            reward = 3000
         done = self.lander.landed or self.lander.crashed
         info = {}
 
@@ -753,18 +544,19 @@ class MarsLanderEnv(gym.Env):
             self.render()
         return state, reward, done, info
 
-    def render(self, mode='human'):
+    def render(self):
         if self.screen is None and self.render_mode == "human":
             pygame.init()
             pygame.display.init()
-            self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+            self.screen = pygame.display.set_mode(
+                (SCREEN_WIDTH, SCREEN_HEIGHT))
         if self.clock is None:
             self.clock = pygame.time.Clock()
 
         self.surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.lander.render(self.surf)
         self.surface.render(self.surf)
-        
+
         if self.render_mode == "human":
             assert self.screen is not None
             self.screen.blit(self.surf, (0, 0))
@@ -784,43 +576,284 @@ class MarsLanderEnv(gym.Env):
             pygame.quit()
             self.isopen = False
 
+
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'next_state', 'reward'))
+
+
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
+
+
+class DQN(nn.Module):
+
+    def __init__(self, n_observations, n_actions):
+        super(DQN, self).__init__()
+        self.layer1 = nn.Linear(n_observations, 32)
+        self.layer2 = nn.Linear(32, 32)
+        self.layer3 = nn.Linear(32, 32)
+        self.layer4 = nn.Linear(32, n_actions)
+
+    # Called with either one element to determine next action, or a batch
+    # during optimization. Returns tensor([[left0exp,right0exp]...]).
+    def forward(self, x):
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        return self.layer4(x)
+
+
 # Set up the Pygame window
 WORLD_WIDTH, WORLD_HEIGHT = 7000, 3000
 SCREEN_WIDTH, SCREEN_HEIGHT = 1400, 700
 # Create a lander
-SURFACE_TOPOLOGY = [(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600), (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)]
+SURFACE_TOPOLOGY = [(0, 450), (300, 750), (1000, 450), (1500, 650), (1800, 850), (2000, 1950), (2200, 1850), (2400, 2000), (3100, 1800), (3150, 1550), (2500, 1600),
+                    (2200, 1550), (2100, 750), (2200, 150), (3200, 150), (3500, 450), (4000, 950), (4500, 1450), (5000, 1550), (5500, 1500), (6000, 950), (6999, 1750)]
 INIT_POSITION = Vector2D(6500, 2600)
 INIT_VELOCITY = Vector2D(0, 0)
 
-lander_env = MarsLanderEnv(INIT_POSITION, INIT_VELOCITY, SURFACE_TOPOLOGY, render_mode='human')
-lander_env.render()
-desired_angle, desired_thrust = 0, 0
-while True:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            self.sim_running = False
-        elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_LEFT:
-                desired_angle = 10
-            elif event.key == pygame.K_RIGHT:
-                desired_angle = -10
-            elif event.key == pygame.K_UP:
-                desired_thrust = 4
-            elif event.key == pygame.K_DOWN:
-                desired_thrust = 0
-            elif event.key == pygame.K_F5:
-                # Reset the lander and surface
-                lander.reset()
-                surface.reset()
-        elif event.type == pygame.KEYUP:
-            # Reset the desired angle and thrust when the keys are released
-            desired_angle = 0
-            desired_thrust = 0
-    action = [desired_thrust, desired_angle]
-    observation, reward, done, info = lander_env.step(action)
-    #print(observation, reward, done, info)
-    lander_env.render()
-    if done:
-        break
+env = MarsLanderEnv(
+    INIT_POSITION, INIT_VELOCITY, SURFACE_TOPOLOGY, render_mode='human')
+# set up matplotlib
+is_ipython = 'inline' in matplotlib.get_backend()
+if is_ipython:
+    from IPython import display
 
-lander_env.close()
+plt.ion()
+
+# if gpu is to be used
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# BATCH_SIZE is the number of transitions sampled from the replay buffer
+# GAMMA is the discount factor as mentioned in the previous section
+# EPS_START is the starting value of epsilon
+# EPS_END is the final value of epsilon
+# EPS_DECAY controls the rate of exponential decay of epsilon, higher means a slower decay
+# TAU is the update rate of the target network
+# LR is the learning rate of the AdamW optimizer
+BATCH_SIZE = 128
+GAMMA = 0.99
+EPS_START = 0.9
+EPS_END = 0.05
+EPS_DECAY = 50000
+TAU = 0.005
+LR = 1e-4
+
+# Get number of actions from gym action space
+n_actions = 2 * 13
+# Get the number of state observations
+state, info = env.reset()
+n_observations = len(state)
+
+policy_net = DQN(n_observations, n_actions).to(device)
+target_net = DQN(n_observations, n_actions).to(device)
+target_net.load_state_dict(policy_net.state_dict())
+
+optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
+memory = ReplayMemory(50000)
+
+episode_durations = []
+
+steps_done = 0
+"""
+# Load the latest episode number and steps_done
+latest_episode = max([int(filename.split("_")[2][2:]) for filename in os.listdir(
+    "models/.99g_1e-4_50000_2000_rand_startx10_50k") if filename.startswith("policy_net")])
+latest_steps = max([int(filename.split("_")[3][:-4]) for filename in os.listdir(
+    "models/.99g_1e-4_50000_2000_rand_startx10_50k") if filename.startswith(f"policy_net_ep{latest_episode}")])
+
+# Load the model state dictionaries
+print(
+    f"Loading 'models/.99g_1e-4_50000_2000_rand_startx10_50k/policy_net_ep{latest_episode}_{latest_steps}.pth' ...")
+policy_net.load_state_dict(torch.load(
+    f"models/.99g_1e-4_50000_2000_rand_startx10_50k/policy_net_ep{latest_episode}_{latest_steps}.pth"))
+print(
+    f"Loading 'models/.99g_1e-4_50000_2000_rand_startx10_50k/target_net_ep{latest_episode}_{latest_steps}.pth' ...")
+target_net.load_state_dict(torch.load(
+    f"models/.99g_1e-4_50000_2000_rand_startx10_50k/target_net_ep{latest_episode}_{latest_steps}.pth"))
+
+print(
+    f"Loading 'models/.99g_1e-4_50000_2000_rand_startx10_50k/memory_buffer_ep{latest_episode}_{latest_steps}.pkl' ...")
+
+# Load the memory buffer and episode rewards
+with open(f"models/.99g_1e-4_50000_2000_rand_startx10_50k/memory_buffer_ep{latest_episode}_{latest_steps}.pkl", "rb") as f:
+    memory = pkl.load(f)
+print(
+    f"Loading 'models/.99g_1e-4_50000_2000_rand_startx10_50k/episode_rewards_ep{latest_episode}_{latest_steps}.pkl' ...")
+
+with open(f"models/.99g_1e-4_50000_2000_rand_startx10_50k/episode_rewards_ep{latest_episode}_{latest_steps}.pkl", "rb") as f:
+    episode_durations = pkl.load(f)
+steps_done = latest_steps
+"""
+
+
+def select_action(state):
+    global steps_done
+    sample = random.random()
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+        math.exp(-1. * steps_done / EPS_DECAY)
+    steps_done += 1
+    if sample > eps_threshold:
+        with torch.no_grad():
+            # t.max(1) will return the largest column value of each row.
+            # second column on max result is index of where max element was
+            # found, so we pick action with the larger expected reward.
+            return policy_net(state).max(1)[1].view(1, 1)
+    else:
+        t, a = env.action_space.sample()
+        encoded_action = (t - 3) * (6 + 6 + 1) + a + 6
+        return torch.tensor(np.array([[encoded_action]]), device=device, dtype=torch.long)
+
+
+def plot_durations(show_result=False):
+    plt.figure(1)
+    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    if show_result:
+        plt.title('Result')
+    else:
+        plt.clf()
+        plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Duration')
+    plt.plot(durations_t.numpy())
+    # Take 100 episode averages and plot them too
+    if len(durations_t) >= 100:
+        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
+
+    plt.pause(0.001)  # pause a bit so that plots are updated
+    if is_ipython:
+        if not show_result:
+            display.display(plt.gcf())
+            display.clear_output(wait=True)
+        else:
+            display.display(plt.gcf())
+
+
+def optimize_model():
+    if len(memory) < BATCH_SIZE:
+        return
+    transitions = memory.sample(BATCH_SIZE)
+    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+    # detailed explanation). This converts batch-array of Transitions
+    # to Transition of batch-arrays.
+    batch = Transition(*zip(*transitions))
+
+    # Compute a mask of non-final states and concatenate the batch elements
+    # (a final state would've been the one after which simulation ended)
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                            batch.next_state)), device=device, dtype=torch.bool)
+    non_final_next_states = torch.cat([s for s in batch.next_state
+                                       if s is not None])
+    state_batch = torch.cat(batch.state)
+    action_batch = torch.cat(batch.action)
+    reward_batch = torch.cat(batch.reward)
+
+    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+    # columns of actions taken. These are the actions which would've been taken
+    # for each batch state according to policy_net
+    state_action_values = policy_net(state_batch).gather(1, action_batch)
+
+    # Compute V(s_{t+1}) for all next states.
+    # Expected values of actions for non_final_next_states are computed based
+    # on the "older" target_net; selecting their best reward with max(1)[0].
+    # This is merged based on the mask, such that we'll have either the expected
+    # state value or 0 in case the state was final.
+    next_state_values = torch.zeros(BATCH_SIZE, device=device)
+    with torch.no_grad():
+        next_state_values[non_final_mask] = target_net(
+            non_final_next_states).max(1)[0]
+    # Compute the expected Q values
+    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+
+    # Compute Huber loss
+    criterion = nn.SmoothL1Loss()
+    loss = criterion(state_action_values,
+                     expected_state_action_values.unsqueeze(1))
+
+    # Optimize the model
+    optimizer.zero_grad()
+    loss.backward()
+    # In-place gradient clipping
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+    optimizer.step()
+
+
+if torch.cuda.is_available():
+    num_episodes = 6000
+else:
+    num_episodes = 50
+
+for i_episode in range(num_episodes):
+    # Initialize the environment and get it's state
+    state, info = env.reset()
+    state = torch.tensor(state, dtype=torch.float32,
+                         device=device).unsqueeze(0)
+    if i_episode % 1000 == 0:
+        with open(f"models/memory_buffer_ep{i_episode:}_{steps_done}.pkl", 'wb') as f:
+            pkl.dump(memory, f)
+        with open(f"models/episode_rewards_ep{i_episode:}_{steps_done}.pkl", "wb") as f:
+            pkl.dump(episode_durations, f)
+
+        torch.save(policy_net.state_dict(),
+                   f"models/policy_net_ep{i_episode:}_{steps_done}.pth")
+        torch.save(target_net.state_dict(),
+                   f"models/target_net_ep{i_episode:}_{steps_done}.pth")
+    if i_episode % 1 == 0:
+        INIT_POSITION.x = random.randint(200, WORLD_WIDTH-200)
+    #steps_done = 0
+    for t in count():
+        # Debug message
+        action = select_action(state)
+        observation, reward, terminated, _ = env.step(action.item())
+        reward = torch.tensor([reward], device=device)
+        done = terminated
+        if t % 50 == 0 or done:
+            print(
+                f"Step {t} of episode {i_episode} {env.lander.position} {reward.item()}")
+        if terminated:
+            next_state = None
+        else:
+            next_state = torch.tensor(
+                observation, dtype=torch.float32, device=device).unsqueeze(0)
+
+        # Store the transition in memory
+        memory.push(state, action, next_state, reward)
+
+        # Move to the next state
+        state = next_state
+
+        # Perform one step of the optimization (on the policy network)
+        optimize_model()
+
+        # Soft update of the target network's weights
+        # θ′ ← τ θ + (1 −τ )θ′
+        target_net_state_dict = target_net.state_dict()
+        policy_net_state_dict = policy_net.state_dict()
+        for key in policy_net_state_dict:
+            target_net_state_dict[key] = policy_net_state_dict[key] * \
+                TAU + target_net_state_dict[key]*(1-TAU)
+        target_net.load_state_dict(target_net_state_dict)
+
+        if done:
+            episode_durations.append(reward)
+            plot_durations()
+            break
+
+print('Complete')
+plot_durations(show_result=True)
+plt.ioff()
+plt.show()
