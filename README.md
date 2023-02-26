@@ -6,3 +6,4 @@
 - Retry the genetic alg with the improved sim
 - Try a genetic alg to select Neural Networks instead
 - Retry the DQN training with the improved sim
+- Convert the direction vector from cartesian to polar coordinates
