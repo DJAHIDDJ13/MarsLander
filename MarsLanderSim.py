@@ -215,6 +215,7 @@ class Lander:
                                    world_to_screen(
                                        self.distance_sensors_collisions[i]),
                                    5)"""
+        """
         sensor_debug_pos = np.array([300, 2800], dtype="float64")
 
         for i, a in enumerate(self.distance_sensors_angles):
@@ -245,6 +246,7 @@ class Lander:
             text = font.render(
                 f"{names[i]} = {value:4.2f}", False, (255, 255, 255))
             screen.blit(text, world_to_screen([100, 2700 - i*50]))
+        """
 
     def get_state(self):
         self.calc_state()  # idk there is a problem somewhere,
@@ -405,17 +407,17 @@ class MarsLanderEnv(gym.Env):
         state = self.lander.get_state()
         assert len(state) == 4 + self.lander.num_distance_sensors
 
-        reward = 2000
+        reward = 1
 
         distance_from_landing_zone = self.lander.distance_to_landing_zone()
-        reward -= distance_from_landing_zone / 2
-        reward -= abs(self.lander.velocity[0])
-        reward -= abs(self.lander.velocity[1])/2
+        reward -= distance_from_landing_zone / 4000
+        reward -= abs(self.lander.velocity[0]) / 300
+        reward -= abs(self.lander.velocity[1]) / 150
         # reset the reward if it's not the final step, we only reward at the end
         if not self.lander.crashed:
             reward = 0
         if self.lander.landed:
-            reward = 3000
+            reward = 10
 
         done = self.lander.landed or self.lander.crashed
         info = {}
