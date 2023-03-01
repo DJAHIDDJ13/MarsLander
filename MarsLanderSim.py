@@ -82,6 +82,9 @@ class Lander:
                               np.array([[0, Lander.WORLD_HEIGHT],
                                         ground[0]])])
 
+        polygon = np.vstack((np.array(ground), [7000, 3000], [0, 3000]))
+        self.poly_segments = (polygon.T, np.roll(polygon, -1, axis=0).T)
+
         # disntance sensors spread out uniformly in circular pattern each one
         # calculates the distance to the nearest surface (including map limits)
         self.num_distance_sensors = 8
@@ -105,17 +108,65 @@ class Lander:
         self.crashed = False
         self.calc_state()
 
-    def collisionCheck(self):
-        angleSum = 0
-        for i in range(len(self.collision_poly)):
-            pointA = self.collision_poly[i]
-            pointB = self.position
-            pointC = self.collision_poly[(i + 1) % len(self.collision_poly)]
-            if Lander.CCW(pointA, pointB, pointC):
-                angleSum += Lander.angle_between(pointA, pointB, pointC)
-            else:
-                angleSum -= Lander.angle_between(pointA, pointB, pointC)
-        return abs(abs(angleSum) - 2 * np.pi) < self.EPS
+    def collision_check(self):
+        points_aa, points_ab = self.poly_segments
+        points_ba = np.tile(self.position, (len(points_aa[0]), 1))
+        # setting the segment to just right of the map
+        points_bb = np.tile(np.array([7001, self.position[1]]),
+                            (len(points_aa[0]), 1))
+
+        x1, y1 = points_aa
+        x2, y2 = points_ab
+        dx1, dy1 = x2 - x1, y2 - y1
+
+        x3, y3 = points_ba.T
+        x4, y4 = points_bb.T
+        dx2, dy2 = x4 - x3, y4 - y3
+
+        # Calculate the determiants
+        det = dx1*dy2 - dy1*dx2
+
+        # Calculate the parameter values for the intersection point
+        # div by zero retuns -inf and raises warning, no problems in calculation however
+        # Might be worth it to supress the warning temporarily here,
+        # using a np.where instead seems overkill
+        t1 = (dy2*(x3-x1) + dx2*(y1-y3)) / det
+        t2 = (dy1*(x3-x1) + dx1*(y1-y3)) / det
+
+        collisions = (t1 >= 0) & (t1 <= 1) & (t2 >= 0) & (t2 <= 1)
+
+        return collisions.sum() % 2 == 0
+
+    # doing both at once to optimize
+
+    def collision_check_with_sensors(self):
+        points_aa, points_ab = self.poly_segments
+        points_ba = np.tile(self.position, (len(points_aa[0]), 1))
+        # setting the segment to just right of the map
+        points_bb = np.tile(np.array([7001, self.position[1]]),
+                            (len(points_aa[0]), 1))
+
+        x1, y1 = points_aa
+        x2, y2 = points_ab
+        dx1, dy1 = x2 - x1, y2 - y1
+
+        x3, y3 = points_ba.T
+        x4, y4 = points_bb.T
+        dx2, dy2 = x4 - x3, y4 - y3
+
+        # Calculate the determiants
+        det = dx1*dy2 - dy1*dx2
+
+        # Calculate the parameter values for the intersection point
+        # div by zero retuns -inf and raises warning, no problems in calculation however
+        # Might be worth it to supress the warning temporarily here,
+        # using a np.where instead seems overkill
+        t1 = (dy2*(x3-x1) + dx2*(y1-y3)) / det
+        t2 = (dy1*(x3-x1) + dx1*(y1-y3)) / det
+
+        collisions = (t1 >= 0) & (t1 <= 1) & (t2 >= 0) & (t2 <= 1)
+
+        return collisions.sum() % 2 == 0
 
     def step(self, thrust, angle, dt=1):
         self.angle = max(
@@ -136,31 +187,18 @@ class Lander:
             self.velocity += self.acceleration * dt
 
         self.turn += 1
-        self.calc_state()
+        # self.calc_state()
         if self.position[0] < 0 or self.position[0] >= self.WORLD_WIDTH or \
            self.position[1] < 0 or self.position[1] >= self.WORLD_HEIGHT:
             self.crashed = True
             return
-        if self.collisionCheck():
+        if self.collision_check():
             if self.angle == 0 and (abs(self.velocity) <= (20, 40)).all():
                 for segment in self.landing_zones:
                     if segment[0] <= self.position[0] <= segment[1] and abs(self.position[1] - segment[2]) < 100:
                         self.landed = True
                         return
             self.crashed = True
-
-    @staticmethod
-    def angle_between(a, b, c):
-        ba = b - a
-        bc = b - c
-        dot_product = np.dot(ba, bc)
-        ba_magnitude = np.linalg.norm(ba)
-        bc_magnitude = np.linalg.norm(bc)
-        return np.arccos(dot_product / (ba_magnitude * bc_magnitude))
-
-    @staticmethod
-    def CCW(a, b, c):
-        return np.cross(b - a, b - c) > -Lander.EPS
 
     @staticmethod
     def rotate_vec(v, angle):
@@ -331,7 +369,7 @@ class Lander:
             self.distance_sensors_values[j] = 9999999
             for segment in self.segments:
                 ds_segment = (self.position, self.position +
-                              self.rotate_vec(np.array([self.WORLD_WIDTH, 0]), distance_sensor_angle))  # rotation is wrong
+                              self.rotate_vec(np.array([self.WORLD_WIDTH, 0]), distance_sensor_angle))
                 hit, collision_point = Lander.segment_collision(
                     segment, ds_segment)
                 # print(f"{collision_point=}")
@@ -404,11 +442,10 @@ class MarsLanderEnv(gym.Env):
 
         self.lander.step(action[0], action[1])
 
-        state = self.lander.get_state()
-        assert len(state) == 4 + self.lander.num_distance_sensors
+        state = None  # self.lander.get_state()
+        #assert len(state) == 4 + self.lander.num_distance_sensors
 
         reward = 1
-
         distance_from_landing_zone = self.lander.distance_to_landing_zone()
         reward -= distance_from_landing_zone / 4000
         reward -= abs(self.lander.velocity[0]) / 300
@@ -471,6 +508,7 @@ def demo_manual_lander():
     s, info = env.reset()
     i = 0
     while True:
+        time.sleep(.05)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pass
@@ -490,7 +528,6 @@ def demo_manual_lander():
                 # Reset the desired angle and thrust when the keys are released
                 desired_angle = 0
                 desired_thrust = 0
-        time.sleep(.05)
         action = [desired_thrust, desired_angle]
         observation, reward, done, info = env.step(action)
         i += 1
