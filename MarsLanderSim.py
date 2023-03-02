@@ -31,7 +31,7 @@ class Lander:
     WORLD_WIDTH = 7000
     WORLD_HEIGHT = 3000
 
-    def __init__(self, init_position, init_velocity, ground):
+    def __init__(self, init_position, init_velocity, ground, calc_sensors=True):
         # Constants
         self.GRAVITY = 3.711
         self.LANDER_RADIUS = 50
@@ -41,6 +41,7 @@ class Lander:
 
         self.crashed = False
         self.landed = False
+        self.calc_sensors = calc_sensors
 
         # Initial position and velocity of the lander
         self.INITIAL_POSITION = init_position
@@ -54,13 +55,14 @@ class Lander:
         self.fuel = 0
         self.turn = 0
 
+        # too much stuff here, TODO: sort it out and remove what isn't needed
         num_ground_points = len(ground) + 2
 
         self.landing_zones = []
-        self.collision_poly = np.zeros((num_ground_points, 2))
         self.landing_zone_indices = []
         lasty = -1
         lastx = -1
+        self.collision_poly = np.zeros((num_ground_points, 2))
         for i, point in enumerate(ground):
             self.collision_poly[i][0] = point[0]
             self.collision_poly[i][1] = point[1]
@@ -70,8 +72,6 @@ class Lander:
                 self.landing_zone_indices.append(i-1)
             lastx, lasty = point
         self.collision_poly[-2][0] = self.WORLD_WIDTH
-
-        self.landing_zones = np.array(self.landing_zones)
         self.segments = [*map(np.array, zip(ground, ground[1:]))]
         self.segments.extend([np.array([ground[-1],
                                         [Lander.WORLD_WIDTH, Lander.WORLD_HEIGHT]]),
@@ -81,15 +81,25 @@ class Lander:
 
                               np.array([[0, Lander.WORLD_HEIGHT],
                                         ground[0]])])
+        self.landing_zones = np.array(self.landing_zones)
 
-        polygon = np.vstack((np.array(ground), [7000, 3000], [0, 3000]))
-        self.poly_segments = (polygon.T, np.roll(polygon, -1, axis=0).T)
-
+        polygon = np.vstack((np.array(ground), [7000, 3000], [0, 3000])).T
+        points_aa = np.tile(polygon, (8, 1, 1))
+        points_ab = np.roll(points_aa, -1, axis=2)
+        points_aa = points_aa.transpose((1, 0, 2))
+        points_ab = points_ab.transpose((1, 0, 2))
+        self.poly_segments = (points_aa, points_ab)
+        self.poly_segments_no_sensors = (
+            polygon, np.roll(polygon.T, -1, axis=0).T)
         # disntance sensors spread out uniformly in circular pattern each one
         # calculates the distance to the nearest surface (including map limits)
         self.num_distance_sensors = 8
-        self.distance_sensors_angles = [remap_scalar(
-            i, 0, self.num_distance_sensors, 0, 360) for i in range(self.num_distance_sensors)]
+        self.distance_sensors_angles = np.array([remap_scalar(
+            i, 0, self.num_distance_sensors, 0, 360) for i in range(self.num_distance_sensors)])
+        rad = self.distance_sensors_angles * np.pi / 180
+        ray_length = 9000
+        self.sensor_rays = np.column_stack(
+            (ray_length * np.cos(rad), ray_length * np.sin(rad)))
         self.distance_sensors_values = [
             -1 for _ in range(self.num_distance_sensors)]
         self.distance_sensors_collisions = [
@@ -109,7 +119,7 @@ class Lander:
         self.calc_state()
 
     def collision_check(self):
-        points_aa, points_ab = self.poly_segments
+        points_aa, points_ab = self.poly_segments_no_sensors
         points_ba = np.tile(self.position, (len(points_aa[0]), 1))
         # setting the segment to just right of the map
         points_bb = np.tile(np.array([7001, self.position[1]]),
@@ -141,17 +151,24 @@ class Lander:
 
     def collision_check_with_sensors(self):
         points_aa, points_ab = self.poly_segments
-        points_ba = np.tile(self.position, (len(points_aa[0]), 1))
-        # setting the segment to just right of the map
-        points_bb = np.tile(np.array([7001, self.position[1]]),
-                            (len(points_aa[0]), 1))
+        points_ba = np.tile(
+            self.position[np.newaxis, :].T, (1, len(points_aa[0])))
+        points_ba = np.tile(
+            self.position[np.newaxis, :, np.newaxis], (8, 1, points_aa.shape[2]))
+        points_bb = self.sensor_rays + self.position[np.newaxis, :]
+        points_bb = np.tile(
+            points_bb[:, :, np.newaxis], (1, 1, points_aa.shape[2]))
 
+        # change the previous lines to avoid this
+        points_ba = points_ba.transpose((1, 0, 2))
+        points_bb = points_bb.transpose((1, 0, 2))
+        # setting the segment to just right of the map
         x1, y1 = points_aa
         x2, y2 = points_ab
         dx1, dy1 = x2 - x1, y2 - y1
 
-        x3, y3 = points_ba.T
-        x4, y4 = points_bb.T
+        x3, y3 = points_ba
+        x4, y4 = points_bb
         dx2, dy2 = x4 - x3, y4 - y3
 
         # Calculate the determiants
@@ -161,12 +178,18 @@ class Lander:
         # div by zero retuns -inf and raises warning, no problems in calculation however
         # Might be worth it to supress the warning temporarily here,
         # using a np.where instead seems overkill
-        t1 = (dy2*(x3-x1) + dx2*(y1-y3)) / det
-        t2 = (dy1*(x3-x1) + dx1*(y1-y3)) / det
+        x3_x1 = x3-x1
+        y1_y3 = y1-y3
+        t1 = (dy2 * x3_x1 + dx2 * y1_y3) / det
+        t2 = (dy1 * x3_x1 + dx1 * y1_y3) / det
 
         collisions = (t1 >= 0) & (t1 <= 1) & (t2 >= 0) & (t2 <= 1)
-
-        return collisions.sum() % 2 == 0
+        self.distance_sensors_collisions = [self.position + t2[i, collisions[i, :]][0] * self.sensor_rays[i]
+                                            if len(t2[i, collisions[i, :]]) else None for i in range(len(t2))]
+        self.distance_sensors_values = [t2[i, collisions[i, :]][0] * np.linalg.norm(self.sensor_rays[i])
+                                        if len(t2[i, collisions[i, :]]) else 99999 for i in range(len(t2))]
+        # any row should work to figure out if the lander is inside the polygon
+        return collisions[0, :].sum() % 2 == 0
 
     def step(self, thrust, angle, dt=1):
         self.angle = max(
@@ -187,12 +210,14 @@ class Lander:
             self.velocity += self.acceleration * dt
 
         self.turn += 1
-        # self.calc_state()
+        self.calc_state()
         if self.position[0] < 0 or self.position[0] >= self.WORLD_WIDTH or \
            self.position[1] < 0 or self.position[1] >= self.WORLD_HEIGHT:
             self.crashed = True
             return
-        if self.collision_check():
+        col = self.collision_check_with_sensors(
+        ) if self.calc_sensors else self.collision_check()
+        if col:
             if self.angle == 0 and (abs(self.velocity) <= (20, 40)).all():
                 for segment in self.landing_zones:
                     if segment[0] <= self.position[0] <= segment[1] and abs(self.position[1] - segment[2]) < 100:
@@ -308,78 +333,7 @@ class Lander:
             QP if 0 < ds < 1 else P if ds <= 0 else Q
         return closest_point_to_landing_zone - self.position
 
-    @staticmethod
-    def segment_collision(segment_1, segment_2):
-        p1, p2 = segment_1
-        p3, p4 = segment_2
-        # Check if one of the segments is vertical
-        # Check for vertical segments
-        if abs(p1[0] - p2[0]) < .0001 and abs(p3[0] - p4[0]) < .0001:  # segment 1 is vertical
-            if p1[0] == p3[0]:  # segments are coincident
-                # Return any point of intersection, since the segments are coincident
-                return True, p3
-        elif abs(p1[0] - p2[0]) < .0001:
-            # Segment 1 is vertical, segment 2 is not
-            # Find the intersection of segment 1 with segment 2
-            m2 = (p4[1] - p3[1]) / (p4[0] - p3[0])  # slope of segment 2
-            b2 = p3[1] - m2 * p3[0]  # y-intercept of segment 2
-            y = m2 * p1[0] + b2  # y-coordinate of intersection
-            # Check if the intersection point is on both segments
-            if min(p1[1], p2[1]) <= y <= max(p1[1], p2[1]) and min(p4[1], p3[1]) <= y <= max(p4[1], p3[1]):
-                if min(p3[0], p4[0]) <= p1[0] <= max(p3[0], p4[0]):
-                    return True, np.array([p1[0], y])
-        elif abs(p3[0] - p4[0]) < .0001:  # segment 2 is vertical
-            # Find the intersection of segment 2 with segment 1
-            m1 = (p2[1] - p1[1]) / (p2[0] - p1[0])  # slope of segment 1
-            b1 = p1[1] - m1 * p1[0]  # y-intercept of segment 1
-            y = m1 * p3[0] + b1  # y-coordinate of intersection
-            # Check if the intersection point is on both segments
-            if min(p1[1], p2[1]) <= y <= max(p1[1], p2[1]) and min(p4[1], p3[1]) <= y <= max(p4[1], p3[1]):
-                if min(p1[0], p2[0]) <= p3[0] <= max(p1[0], p2[0]):
-                    return True, np.array([p3[0], y])
-        else:
-            # Convert the line segments to the form y = mx + b
-            m1 = (p2[1] - p1[1]) / (p2[0] - p1[0]
-                                    ) if p2[0] != p1[0] else float('inf')
-            b1 = p1[1] - m1 * p1[0]
-            m2 = (p4[1] - p3[1]) / (p4[0] - p3[0]
-                                    ) if p4[0] != p3[0] else float('inf')
-            b2 = p3[1] - m2 * p3[0]
-            # Check if the segments are colliding
-            if m1 != m2:
-                x = (b2 - b1) / (m1 - m2)
-                y = m1 * x + b1
-                # Calculate the x-coordinate of the intersection point
-                # Check if the x-coordinate falls within both segments
-                if (x >= p1[0] and x <= p2[0]) or (x >= p2[0] and x <= p1[0]):
-                    if (x >= p3[0] and x <= p4[0]) or (x >= p4[0] and x <= p3[0]):
-                        return True, np.array([x, y])
-            else:
-                # Check if the y-intercepts are equal (coincident)
-                if b1 == b2:
-                    if np.linalg.norm(p3 - p1) < np.linalg.norm(p3 - p2):
-                        return True, p2
-                    else:
-                        return True, p1
-
-        return False, np.array([99999, 99999])
-
-    def calc_distance_sensors(self):
-        for j, distance_sensor_angle in enumerate(self.distance_sensors_angles):
-            self.distance_sensors_values[j] = 9999999
-            for segment in self.segments:
-                ds_segment = (self.position, self.position +
-                              self.rotate_vec(np.array([self.WORLD_WIDTH, 0]), distance_sensor_angle))
-                hit, collision_point = Lander.segment_collision(
-                    segment, ds_segment)
-                # print(f"{collision_point=}")
-                temp_dist = np.linalg.norm(self.position - collision_point)
-                if hit and self.distance_sensors_values[j] > temp_dist:
-                    self.distance_sensors_values[j] = temp_dist
-                    self.distance_sensors_collisions[j] = collision_point
-
     def calc_state(self):
-        self.calc_distance_sensors()
         dir_to_land = self.direction_to_landing_zone()
         # Convert dir_to_land to polar coordiantes
         r = np.hypot(dir_to_land[0], dir_to_land[1])
@@ -401,8 +355,9 @@ class MarsLanderEnv(gym.Env):
     SCREEN_WIDTH = 1400
     SCREEN_HEIGHT = 700
 
-    def __init__(self, init_position, init_velocity, surface_topology, render_mode='rgb_array'):
-        self.lander = Lander(init_position, init_velocity, surface_topology)
+    def __init__(self, init_position, init_velocity, surface_topology, calc_sensors=True, render_mode='rgb_array'):
+        self.lander = Lander(init_position, init_velocity,
+                             surface_topology, calc_sensors)
 
         low_vel = np.array([-1000, -1000], dtype=np.float32)
         high_vel = np.array([1000, 1000], dtype=np.float32)
@@ -503,7 +458,7 @@ def demo_manual_lander():
     INIT_POSITION = np.array([6500, 2600])
     INIT_VELOCITY = np.array([0, 0])
     env = MarsLanderEnv(
-        INIT_POSITION, INIT_VELOCITY, SURFACE_TOPOLOGY, render_mode='human')
+        INIT_POSITION, INIT_VELOCITY, SURFACE_TOPOLOGY, calc_sensors=True, render_mode='human')
     desired_thrust, desired_angle = 0, 0
     s, info = env.reset()
     i = 0
