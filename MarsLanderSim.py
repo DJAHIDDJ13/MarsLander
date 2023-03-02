@@ -397,8 +397,8 @@ class MarsLanderEnv(gym.Env):
 
         self.lander.step(action[0], action[1])
 
-        state = None  # self.lander.get_state()
-        #assert len(state) == 4 + self.lander.num_distance_sensors
+        state = self.lander.state
+        assert len(state) == 4 + self.lander.num_distance_sensors
 
         reward = 1
         distance_from_landing_zone = self.lander.distance_to_landing_zone()
